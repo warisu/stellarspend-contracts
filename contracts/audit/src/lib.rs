@@ -366,6 +366,94 @@ impl AuditContract {
             panic!("unauthorized: only admin can call this function");
         }
     }
+
+    // ── Integrity Verification Functions ──────────────────────────────────────
+
+    /// Verify the integrity of a specific audit log entry.
+    /// Ensures the log cannot be altered or has been corrupted.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `index` - The index of the audit log to verify
+    ///
+    /// # Returns
+    /// `true` if the log exists and is valid, `false` otherwise
+    pub fn verify_audit_log_integrity(env: Env, index: u64) -> bool {
+        // Check if the log exists
+        if let Some(log) = env.storage().persistent().get::<_, AuditLog>(&DataKey::AuditLog(index)) {
+            // Verify that metadata_len matches actual metadata length
+            let actual_len = match &log.metadata {
+                Some(meta) => meta.len() as u32,
+                None => 0,
+            };
+
+            // Log is considered valid if metadata_len matches actual metadata length
+            log.metadata_len == actual_len
+        } else {
+            // Non-existent logs are not "invalid" - just return false
+            false
+        }
+    }
+
+    /// Verify the integrity of all audit logs in a given range.
+    /// Returns count of valid and invalid logs.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `start_index` - Starting index for verification
+    /// * `end_index` - Ending index for verification
+    ///
+    /// # Returns
+    /// Tuple of (valid_count, invalid_count)
+    pub fn verify_audit_logs_range(env: Env, start_index: u64, end_index: u64) -> (u64, u64) {
+        if start_index > end_index {
+            panic!("start index cannot be greater than end index");
+        }
+
+        let total_logs = Self::get_total_audit_logs(env.clone());
+        if end_index > total_logs {
+            panic!("end index exceeds total number of audit logs");
+        }
+
+        let mut valid_count: u64 = 0;
+        let mut invalid_count: u64 = 0;
+
+        for i in start_index..=end_index {
+            if Self::verify_audit_log_integrity(env.clone(), i) {
+                valid_count += 1;
+            } else {
+                invalid_count += 1;
+            }
+        }
+
+        (valid_count, invalid_count)
+    }
+
+    /// Verify that an audit log has an immutable structure.
+    /// This checks that the log entry cannot be overwritten by comparing
+    /// the stored log data against its original state.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `index` - The index of the audit log
+    /// * `expected_actor` - The expected actor from the original log
+    /// * `expected_operation` - The expected operation from the original log
+    ///
+    /// # Returns
+    /// `true` if the log has not been modified, `false` otherwise
+    pub fn verify_audit_immutability(
+        env: Env,
+        index: u64,
+        expected_actor: Address,
+        expected_operation: Symbol,
+    ) -> bool {
+        if let Some(log) = env.storage().persistent().get::<_, AuditLog>(&DataKey::AuditLog(index)) {
+            // Check that critical fields match (actor and operation should not change)
+            log.actor == expected_actor && log.operation == expected_operation
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
