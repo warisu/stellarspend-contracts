@@ -27,6 +27,7 @@ pub struct Transaction {
     pub timestamp: u64,
     pub status: TransactionStatus,
     pub tx_type: Symbol,
+    pub is_public: bool,
 }
 
 #[derive(Clone)]
@@ -54,6 +55,7 @@ pub fn create_transaction(
     memo: String,
     tags: Vec<String>,
     tx_type: Symbol,
+    is_public: bool,
 ) -> Transaction {
     let tx_id = crate::utils::generate_transaction_id(env);
     
@@ -78,6 +80,7 @@ pub fn create_transaction(
         timestamp: env.ledger().timestamp(),
         status: TransactionStatus::Completed,
         tx_type,
+        is_public,
     };
     
     // Store the transaction
