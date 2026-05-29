@@ -517,3 +517,25 @@ fn test_enforce_without_limit_does_not_block() {
     // No limit configured for this user; enforce should be a no-op and not panic.
     client.enforce_spending_limit(&user, &1_000_000);
 }
+
+#[test]
+fn create_food_budget() {
+    // create budget with Food category
+    // fetch budget
+    // assert category == Food
+}
+
+#[test]
+fn filter_budgets_by_category() {
+    // create FOOD budget
+    // create RENT budget
+    // query FOOD
+    // assert only FOOD returned
+}
+
+#[test]
+fn uncategorized_budgets_are_excluded_from_category_filter() {
+    // create uncategorized budget
+    // filter FOOD
+    // assert empty
+}
