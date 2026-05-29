@@ -16,8 +16,8 @@ mod test;
 mod types;
 
 use crate::types::{
-    BatchBudgetResult, BudgetRecord, BudgetRequest, CategoryBudgetRequest, DataKey,
-    UserBudgetCategories,
+    BatchBudgetResult, BudgetAllocationSummary, BudgetRecord, BudgetRequest, CategoryBudgetRequest,
+    DataKey, UserBudgetCategories,
 };
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map, Symbol, Vec};
 
@@ -212,6 +212,47 @@ impl BudgetAllocationContract {
     /// Retrieves the budget for a specific user.
     pub fn get_budget(env: Env, user: Address) -> Option<BudgetRecord> {
         env.storage().persistent().get(&DataKey::Budget(user))
+    }
+
+    /// Retrieves a summary of the allocation state for a specific user.
+    pub fn get_budget_allocation_summary(
+        env: Env,
+        user: Address,
+    ) -> Option<BudgetAllocationSummary> {
+        let user_categories: Option<UserBudgetCategories> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BudgetCategories(user.clone()));
+
+        if let Some(categories) = user_categories {
+            let mut remaining_allocation: i128 = 0;
+            for amount in categories.categories.values() {
+                remaining_allocation = remaining_allocation
+                    .checked_add(amount)
+                    .unwrap_or(i128::MAX);
+            }
+
+            let total_allocation = categories.total_amount;
+            let used_allocation = total_allocation.saturating_sub(remaining_allocation);
+            let usage_percentage = if total_allocation == 0 {
+                0
+            } else {
+                used_allocation.saturating_mul(100) / total_allocation
+            };
+
+            return Some(BudgetAllocationSummary {
+                remaining_allocation,
+                total_allocation,
+                usage_percentage,
+            });
+        }
+
+        let budget: Option<BudgetRecord> = env.storage().persistent().get(&DataKey::Budget(user));
+        budget.map(|record| BudgetAllocationSummary {
+            remaining_allocation: record.amount,
+            total_allocation: record.amount,
+            usage_percentage: 0,
+        })
     }
 
     /// Returns the admin address
