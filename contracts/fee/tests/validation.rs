@@ -19,6 +19,13 @@ fn initialize_rejects_invalid_fee_bps() {
 
 #[test]
 #[should_panic]
+fn set_fee_bps_rejects_fee_above_100_percent() {
+    let ctx = setup();
+    ctx.client.set_fee_bps(&ctx.admin, &10_001u32);
+}
+
+#[test]
+#[should_panic]
 fn set_min_fee_rejects_negative() {
     let ctx = setup();
     ctx.client.set_min_fee(&ctx.admin, &-5i128);

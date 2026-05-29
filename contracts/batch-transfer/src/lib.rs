@@ -10,6 +10,7 @@ pub use crate::types::{
     BatchBurnResult, BatchTransferResult, BurnRequest, BurnResult, DataKey, TransferEvents,
     TransferRequest, TransferResult, MAX_BATCH_SIZE,
 };
+//bbbb
 use crate::validation::{validate_address, validate_amount};
 
 /// Error codes for the batch transfer contract.
@@ -77,6 +78,9 @@ impl BatchTransferContract {
             panic_with_error!(&env, BatchTransferError::BatchTooLarge);
         }
 
+        // Prepare duplicate detection state.
+        let mut seen_recipients: Vec<Address> = Vec::new(&env);
+
         // Get batch ID and increment
         let batch_id: u64 = env
             .storage()
@@ -108,16 +112,28 @@ impl BatchTransferContract {
         for request in transfers.iter() {
             let mut is_valid = true;
             let mut error_code = 0u32;
+            let mut is_unique = true;
 
             // Validate recipient address
             if validate_address(&env, &request.recipient).is_err() {
                 is_valid = false;
                 error_code = 0; // Invalid address
+                is_unique = false;
+            }
+            // Validate duplicate recipient in batch
+            else if validate_unique_recipient(&seen_recipients, &request.recipient).is_err() {
+                is_valid = false;
+                error_code = 3; // Duplicate recipient
+                is_unique = false;
             }
             // Validate amount
             else if validate_amount(request.amount).is_err() {
                 is_valid = false;
                 error_code = 1; // Invalid amount
+            }
+
+            if is_unique {
+                seen_recipients.push_back(request.recipient.clone());
             }
 
             if is_valid {

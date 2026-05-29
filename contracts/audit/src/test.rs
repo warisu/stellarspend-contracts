@@ -380,6 +380,7 @@ fn test_audit_events_emitted() {
 }
 
 #[test]
+#[should_panic(expected = "audit log timestamp cannot be in the future")]
 fn test_timestamp_validation_in_batch() {
     let env = setup_env();
     let (client, admin) = deploy_contract(&env);
@@ -403,8 +404,260 @@ fn test_timestamp_validation_in_batch() {
     logs.push_back(future_log);
 
     // This should panic because the timestamp is in the future
-    #[should_panic(expected = "audit log timestamp cannot be in the future")]
-    {
-        client.batch_log_audit(&admin, &logs);
+    client.batch_log_audit(&admin, &logs);
+}
+
+// ─── Audit Log Integrity Verification Tests ──────────────────────────────────
+
+#[test]
+fn test_verify_audit_log_integrity_valid() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let actor = Address::generate(&env);
+    let operation = Symbol::new(&env, "transfer");
+    let status = Symbol::new(&env, "success");
+    let metadata = None;
+
+    // Log an audit entry
+    client.log_audit(&actor, &operation, &status, metadata);
+
+    // Verify the integrity of the logged entry
+    assert!(client.verify_audit_log_integrity(&1));
+}
+
+#[test]
+fn test_verify_audit_log_integrity_with_metadata() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let actor = Address::generate(&env);
+    let operation = Symbol::new(&env, "config_update");
+    let status = Symbol::new(&env, "success");
+    let mut metadata_bytes = soroban_sdk::Bytes::new(&env);
+    metadata_bytes.extend_from_slice(&[1u8, 2u8, 3u8, 4u8, 5u8]);
+    let metadata = Some(metadata_bytes);
+
+    // Log an audit entry with metadata
+    client.log_audit(&actor, &operation, &status, metadata.clone());
+
+    // Verify the integrity of the logged entry
+    assert!(client.verify_audit_log_integrity(&1));
+
+    // Verify the metadata length is correct
+    let log = client.get_audit_log(&1).unwrap();
+    assert_eq!(log.metadata_len, 5);
+    assert_eq!(log.metadata.unwrap().len(), 5);
+}
+
+#[test]
+fn test_verify_audit_log_integrity_nonexistent() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    // Try to verify a non-existent log
+    assert!(!client.verify_audit_log_integrity(&999));
+}
+
+#[test]
+fn test_verify_audit_logs_range_integrity() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let actor = Address::generate(&env);
+    let operation = Symbol::new(&env, "operation");
+    let status = Symbol::new(&env, "success");
+
+    // Create multiple audit logs
+    for i in 0..5 {
+        let mut metadata_bytes = soroban_sdk::Bytes::new(&env);
+        metadata_bytes.extend_from_slice(&[i as u8]);
+        client.log_audit(
+            &actor,
+            &operation,
+            &status,
+            Some(metadata_bytes),
+        );
     }
+
+    // Verify all logs in range 1-5 are valid
+    let (valid_count, invalid_count) = client.verify_audit_logs_range(&1, &5);
+    assert_eq!(valid_count, 5);
+    assert_eq!(invalid_count, 0);
+}
+
+#[test]
+fn test_verify_audit_immutability() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let actor = Address::generate(&env);
+    let operation = Symbol::new(&env, "transfer");
+    let status = Symbol::new(&env, "success");
+
+    // Log an audit entry
+    client.log_audit(&actor, &operation, &status, None);
+
+    // Verify immutability with correct data
+    assert!(client.verify_audit_immutability(&1, &actor, &operation));
+
+    // Verify immutability fails with different actor
+    let different_actor = Address::generate(&env);
+    assert!(!client.verify_audit_immutability(&1, &different_actor, &operation));
+
+    // Verify immutability fails with different operation
+    let different_operation = Symbol::new(&env, "different");
+    assert!(!client.verify_audit_immutability(&1, &actor, &different_operation));
+}
+
+#[test]
+fn test_verify_audit_immutability_consistency_check() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    // Create multiple logs
+    let actor1 = Address::generate(&env);
+    let actor2 = Address::generate(&env);
+    let op1 = Symbol::new(&env, "transfer");
+    let op2 = Symbol::new(&env, "withdrawal");
+    let status = Symbol::new(&env, "success");
+
+    client.log_audit(&actor1, &op1, &status, None);
+    client.log_audit(&actor2, &op2, &status, None);
+    client.log_audit(&actor1, &op2, &status, None);
+
+    // Verify each log's immutability
+    assert!(client.verify_audit_immutability(&1, &actor1, &op1));
+    assert!(client.verify_audit_immutability(&2, &actor2, &op2));
+    assert!(client.verify_audit_immutability(&3, &actor1, &op2));
+
+    // Verify cross-contamination doesn't occur
+    assert!(!client.verify_audit_immutability(&1, &actor2, &op1));
+    assert!(!client.verify_audit_immutability(&2, &actor1, &op2));
+}
+
+// ─── Unauthorized Audit Operation Tests ──────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "unauthorized: only admin can call this function")]
+fn test_unauthorized_batch_log_audit() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let unauthorized_user = Address::generate(&env);
+    let actor = Address::generate(&env);
+    let operation = Symbol::new(&env, "transfer");
+    let status = Symbol::new(&env, "success");
+
+    // Create a log
+    let audit_log = AuditLog {
+        actor: actor.clone(),
+        operation,
+        timestamp: 1_700_000_000,
+        status,
+        metadata: None,
+        metadata_len: 0,
+    };
+
+    let mut logs: Vec<AuditLog> = Vec::new(&env);
+    logs.push_back(audit_log);
+
+    // This should panic because unauthorized_user is not admin
+    client.batch_log_audit(&unauthorized_user, &logs);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: only admin can call this function")]
+fn test_unauthorized_set_max_metadata_size() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let unauthorized_user = Address::generate(&env);
+
+    // This should panic because unauthorized_user is not admin
+    client.set_max_metadata_size(&unauthorized_user, &2000_u32);
+}
+
+#[test]
+fn test_audit_log_cannot_be_overwritten() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let actor = Address::generate(&env);
+    let operation1 = Symbol::new(&env, "transfer");
+    let operation2 = Symbol::new(&env, "withdrawal");
+    let status = Symbol::new(&env, "success");
+
+    // Log initial entry
+    client.log_audit(&actor, &operation1, &status, None);
+
+    // Verify the first entry
+    let log1 = client.get_audit_log(&1).unwrap();
+    assert_eq!(log1.operation, operation1);
+    assert!(client.verify_audit_immutability(&1, &actor, &operation1));
+
+    // Log a second entry with different operation
+    client.log_audit(&actor, &operation2, &status, None);
+
+    // Verify first entry still has original operation (not overwritten)
+    let log1_after = client.get_audit_log(&1).unwrap();
+    assert_eq!(log1_after.operation, operation1);
+    assert!(client.verify_audit_immutability(&1, &actor, &operation1));
+
+    // Verify second entry has different operation
+    let log2 = client.get_audit_log(&2).unwrap();
+    assert_eq!(log2.operation, operation2);
+    assert!(client.verify_audit_immutability(&2, &actor, &operation2));
+}
+
+#[test]
+fn test_audit_log_integrity_batch_consistency() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let actor1 = Address::generate(&env);
+    let actor2 = Address::generate(&env);
+    let operation = Symbol::new(&env, "transfer");
+    let status = Symbol::new(&env, "success");
+
+    // Create a batch of logs
+    let mut logs: Vec<AuditLog> = Vec::new(&env);
+    
+    for i in 1..=3 {
+        let mut metadata_bytes = soroban_sdk::Bytes::new(&env);
+        metadata_bytes.extend_from_slice(&[i as u8; 5]);
+        
+        let audit_log = AuditLog {
+            actor: if i % 2 == 0 { actor2.clone() } else { actor1.clone() },
+            operation: operation.clone(),
+            timestamp: 1_700_000_000 + i as u64,
+            status: status.clone(),
+            metadata: Some(metadata_bytes),
+            metadata_len: 5,
+        };
+        logs.push_back(audit_log);
+    }
+
+    // Log the batch
+    client.batch_log_audit(&admin, &logs);
+
+    // Verify all logs in batch are intact
+    let (valid_count, invalid_count) = client.verify_audit_logs_range(&1, &3);
+    assert_eq!(valid_count, 3);
+    assert_eq!(invalid_count, 0);
+
+    // Verify each log's immutability
+    assert!(client.verify_audit_immutability(&1, &actor1, &operation));
+    assert!(client.verify_audit_immutability(&2, &actor2, &operation));
+    assert!(client.verify_audit_immutability(&3, &actor1, &operation));
 }

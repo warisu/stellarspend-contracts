@@ -83,8 +83,6 @@ use crate::types::{
 ///
 /// # Returns
 /// * `FeeCalculationResult` containing the calculated fee and net amount
-pub fn calculate_transaction_fee(env: &Env, amount: i128, fee_config: &FeeConfig) -> FeeCalculationResult {
-    if is_fee_paused(env) || amount <= 0 {
 pub fn calculate_transaction_fee(
     env: &Env,
     amount: i128,
@@ -564,5 +562,4 @@ mod tests {
         let result_resumed = crate::fees::calculate_transaction_fee(&env, 10000, &config);
         assert_eq!(result_resumed.fee_amount, 100);
     }
-}
 }

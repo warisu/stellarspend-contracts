@@ -1,7 +1,16 @@
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, Env, Symbol};
 
 pub const MAX_BATCH_SIZE: u32 = 100;
 pub const MAX_FEE_BPS: u32 = 10_000;
+
+/// Default fee basis points (5% = 500 bps)
+pub const DEFAULT_FEE_BPS: u32 = 500;
+
+/// Default minimum fee (0)
+pub const DEFAULT_MIN_FEE: i128 = 0;
+
+/// Default maximum fee (1,000,000)
+pub const DEFAULT_MAX_FEE: i128 = 1_000_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
@@ -20,6 +29,7 @@ pub enum DataKey {
     Treasury,
     FeeBps,
     MinFee,
+    MaxFee,
     IsLocked,
     CurrentCycle,
     EscrowBalance,
@@ -28,20 +38,21 @@ pub enum DataKey {
     TotalBatchCalls,
     PendingFees(u64),
     UserActivity(Address),
+    UserTier(Address),
 }
 
 pub fn has_admin(env: &Env) -> bool {
-    env.storage().instance().has(&DataKey::Admin)
+    env.storage().instance().has(&shared::SharedDataKey::Admin)
 }
 
 pub fn write_admin(env: &Env, admin: &Address) {
-    env.storage().instance().set(&DataKey::Admin, admin);
+    env.storage().instance().set(&shared::SharedDataKey::Admin, admin);
 }
 
 pub fn read_admin(env: &Env) -> Address {
     env.storage()
         .instance()
-        .get(&DataKey::Admin)
+        .get(&shared::SharedDataKey::Admin)
         .expect("Contract not initialized")
 }
 
@@ -75,7 +86,7 @@ pub fn read_fee_bps(env: &Env) -> u32 {
     env.storage()
         .instance()
         .get(&DataKey::FeeBps)
-        .expect("Contract not initialized")
+        .unwrap_or(DEFAULT_FEE_BPS)
 }
 
 pub fn write_min_fee(env: &Env, min_fee: i128) {
@@ -83,7 +94,15 @@ pub fn write_min_fee(env: &Env, min_fee: i128) {
 }
 
 pub fn read_min_fee(env: &Env) -> i128 {
-    env.storage().instance().get(&DataKey::MinFee).unwrap_or(0)
+    env.storage().instance().get(&DataKey::MinFee).unwrap_or(DEFAULT_MIN_FEE)
+}
+
+pub fn write_max_fee(env: &Env, max_fee: i128) {
+    env.storage().instance().set(&DataKey::MaxFee, &max_fee);
+}
+
+pub fn read_max_fee(env: &Env) -> i128 {
+    env.storage().instance().get(&DataKey::MaxFee).unwrap_or(DEFAULT_MAX_FEE)
 }
 
 pub fn write_locked(env: &Env, is_locked: bool) {
@@ -210,4 +229,46 @@ pub fn write_last_active(env: &Env, user: &Address, timestamp: u64) {
     env.storage()
         .persistent()
         .set(&DataKey::UserActivity(user.clone()), &timestamp);
+}
+
+// ---------------------------------------------------------------------------
+// User tier storage helpers
+// ---------------------------------------------------------------------------
+
+/// Predefined valid tier symbols.
+pub const TIER_BRONZE: &str = "bronze";
+pub const TIER_SILVER: &str = "silver";
+pub const TIER_GOLD: &str = "gold";
+pub const TIER_PLATINUM: &str = "platinum";
+
+/// Returns true if `tier` is one of the predefined valid tiers.
+pub fn is_valid_tier(env: &Env, tier: &Symbol) -> bool {
+    let bronze = Symbol::new(env, TIER_BRONZE);
+    let silver = Symbol::new(env, TIER_SILVER);
+    let gold = Symbol::new(env, TIER_GOLD);
+    let platinum = Symbol::new(env, TIER_PLATINUM);
+    *tier == bronze || *tier == silver || *tier == gold || *tier == platinum
+}
+
+pub fn write_user_tier(env: &Env, user: &Address, tier: &Symbol) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::UserTier(user.clone()), tier);
+}
+
+pub fn read_user_tier(env: &Env, user: &Address) -> Option<Symbol> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::UserTier(user.clone()))
+}
+
+pub fn remove_user_tier(env: &Env, user: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::UserTier(user.clone()));
+}
+
+/// Check if fee configuration exists (has admin and fee_bps set)
+pub fn has_fee_config(env: &Env) -> bool {
+    has_admin(env) && env.storage().instance().has(&DataKey::FeeBps)
 }
