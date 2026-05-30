@@ -1,4 +1,6 @@
-//! Data types and events for spending limit operations.
+use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
+
+// ─── Budget Types ───────────────────────────────────────────────────────────
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
@@ -189,51 +191,172 @@ pub struct Budget {
     pub status: BudgetStatus,
 }
 
-/// Events emitted by the spending limits contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub enum BudgetCategory {
+    Food,
+    Transport,
+    Rent,
+    Entertainment,
+}
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+pub const MAX_BATCH_SIZE: u32 = 100;
+pub const MIN_SPENDING_LIMIT: i128 = 1_000_000;
+pub const MAX_SPENDING_LIMIT: i128 = 100_000_000_000_000_000;
+pub const MIN_RESET_WINDOW_SECONDS: u64 = 86_400;
+pub const MAX_RESET_WINDOW_SECONDS: u64 = 86_400 * 365;
+
+// ─── Storage Keys ───────────────────────────────────────────────────────────
+
+/// Storage keys for the spending limits contract.
+///
+/// # Storage Optimization (Issue #484)
+///
+/// The previously separate `Admin`, `LastBatchId`, `TotalLimitsUpdated`, and
+/// `TotalBatchesProcessed` keys have been consolidated into a single
+/// `LimitsConfig` struct. This reduces instance storage operations from 4
+/// reads/writes to 1 per access, lowering the overall storage footprint and
+/// Soroban rent costs.
+#[derive(Clone)]
+#[contracttype]
+pub enum DataKey {
+    /// Consolidated limits configuration (was 4 separate keys).
+    LimitsConfig,
+    /// Per-user spending limit.
+    SpendingLimit(Address),
+    /// Window-level spending counter.
+    WindowSpending(Address, u64),
+    /// Month-level spending counter.
+    MonthlySpending(Address, u64),
+}
+
+// ─── Limits Config ──────────────────────────────────────────────────────────
+
+/// Consolidated instance-storage configuration for the spending limits
+/// contract.
+///
+/// Replaces the four previously separate storage entries:
+///   `Admin`, `LastBatchId`, `TotalLimitsUpdated`, `TotalBatchesProcessed`.
+///
+/// Reading/writing a single struct is ~4× more efficient than reading/writing
+/// four individual keys due to reduced storage I/O overhead in Soroban.
+#[derive(Clone)]
+#[contracttype]
+pub struct LimitsConfig {
+    pub admin: Address,
+    pub last_batch_id: u64,
+    pub total_limits_updated: u64,
+    pub total_batches_processed: u64,
+}
+
+// ─── Spending Limit Types ───────────────────────────────────────────────────
+
+#[derive(Clone)]
+#[contracttype]
+pub struct SpendingLimit {
+    pub user: Address,
+    pub monthly_limit: i128,
+    pub reset_window_seconds: u64,
+    pub current_spending: i128,
+    pub category: Option<Symbol>,
+    pub updated_at: u64,
+    pub is_active: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct SpendingLimitRequest {
+    pub user: Address,
+    pub monthly_limit: i128,
+    pub reset_window_seconds: u64,
+    pub category: Option<Symbol>,
+}
+
+// ─── Result Types ───────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+#[contracttype]
+pub enum LimitUpdateResult {
+    Success(SpendingLimit),
+    Failure(Address, u32),
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct BatchLimitMetrics {
+    pub total_requests: u32,
+    pub successful_updates: u32,
+    pub failed_updates: u32,
+    pub total_limits_value: i128,
+    pub avg_limit_amount: i128,
+    pub processed_at: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct BatchLimitResult {
+    pub batch_id: u64,
+    pub total_requests: u32,
+    pub successful: u32,
+    pub failed: u32,
+    pub results: Vec<LimitUpdateResult>,
+    pub metrics: BatchLimitMetrics,
+}
+
+// ─── Error Codes ────────────────────────────────────────────────────────────
+
+pub struct ErrorCode;
+
+impl ErrorCode {
+    pub const INVALID_USER_ADDRESS: u32 = 1;
+    pub const INVALID_LIMIT: u32 = 2;
+}
+
+// ─── Event Helpers ──────────────────────────────────────────────────────────
+
 pub struct LimitEvents;
 
 impl LimitEvents {
-    /// Event emitted when batch limit updates start.
-    pub fn batch_started(env: &Env, batch_id: u64, request_count: u32) {
-        let topics = (symbol_short!("batch"), symbol_short!("started"));
-        env.events().publish(topics, (batch_id, request_count));
-    }
-
-    /// Event emitted when a limit is successfully updated.
-    pub fn limit_updated(env: &Env, batch_id: u64, limit: &SpendingLimit) {
-        let topics = (symbol_short!("limit"), symbol_short!("updated"), batch_id);
+    pub fn batch_started(env: &Env, batch_id: u64, count: u32) {
         env.events().publish(
-            topics,
-            (limit.user.clone(), limit.monthly_limit),
+            (Symbol::new(env, "limit"), Symbol::new(env, "batch_started")),
+            (batch_id, count),
         );
     }
 
-    /// Event emitted when a limit update fails.
-    pub fn limit_update_failed(env: &Env, batch_id: u64, user: &Address, error_code: u32) {
-        let topics = (symbol_short!("limit"), symbol_short!("failed"), batch_id);
-        env.events().publish(topics, (user.clone(), error_code));
+    pub fn limit_updated(env: &Env, batch_id: u64, limit: &SpendingLimit) {
+        env.events().publish(
+            (Symbol::new(env, "limit"), Symbol::new(env, "updated")),
+            (batch_id, limit.user.clone(), limit.monthly_limit),
+        );
     }
 
-    /// Event emitted when batch processing completes.
-    pub fn batch_completed(
-        env: &Env,
-        batch_id: u64,
-        successful: u32,
-        failed: u32,
-        total_value: i128,
-    ) {
-        let topics = (symbol_short!("batch"), symbol_short!("completed"), batch_id);
-        env.events()
-            .publish(topics, (successful, failed, total_value));
-    }
-
-    /// Event emitted for high-value limits.
     pub fn high_value_limit(env: &Env, batch_id: u64, user: &Address, amount: i128) {
-        let topics = (symbol_short!("limit"), symbol_short!("highval"), batch_id);
-        env.events().publish(topics, (user.clone(), amount));
+        env.events().publish(
+            (Symbol::new(env, "limit"), Symbol::new(env, "high_value")),
+            (batch_id, user.clone(), amount),
+        );
     }
 
-    /// Event emitted when a spending limit is exceeded.
+    pub fn limit_update_failed(env: &Env, batch_id: u64, user: &Address, error_code: u32) {
+        env.events().publish(
+            (Symbol::new(env, "limit"), Symbol::new(env, "update_failed")),
+            (batch_id, user.clone(), error_code),
+        );
+    }
+
+    pub fn batch_completed(env: &Env, batch_id: u64, success: u32, failed: u32, total: i128) {
+        env.events().publish(
+            (
+                Symbol::new(env, "limit"),
+                Symbol::new(env, "batch_completed"),
+            ),
+            (batch_id, success, failed, total),
+        );
+    }
+
     pub fn limit_exceeded(
         env: &Env,
         user: &Address,
@@ -241,33 +364,9 @@ impl LimitEvents {
         remaining_window: i128,
         remaining_monthly: i128,
     ) {
-        let topics = (symbol_short!("limit"), symbol_short!("exceeded"));
-        env.events()
-            .publish(topics, (user.clone(), amount, remaining_window, remaining_monthly));
-    }
-
-    /// Event emitted when a large spend triggers escalation.
-    pub fn escalation_triggered(env: &Env, user: &Address, amount: i128, level: u32) {
-        let topics = (symbol_short!("escalation"), symbol_short!("triggered"));
-        env.events().publish(topics, (user.clone(), amount, level));
-    }
-
-    /// Event emitted when an escalated spend is approved.
-    pub fn escalation_approved(env: &Env, admin: &Address, user: &Address, amount: i128) {
-        let topics = (symbol_short!("escalation"), symbol_short!("approved"));
-        env.events()
-            .publish(topics, (admin.clone(), user.clone(), amount));
-    }
-
-    /// Event emitted when escalation rules are configured.
-    pub fn escalation_configured(
-        env: &Env,
-        small_threshold: i128,
-        medium_threshold: i128,
-        enabled: bool,
-    ) {
-        let topics = (symbol_short!("escalation"), symbol_short!("configured"));
-        env.events()
-            .publish(topics, (small_threshold, medium_threshold, enabled));
+        env.events().publish(
+            (Symbol::new(env, "limit"), Symbol::new(env, "exceeded")),
+            (user.clone(), amount, remaining_window, remaining_monthly),
+        );
     }
 }
