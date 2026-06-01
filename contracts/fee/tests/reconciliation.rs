@@ -175,3 +175,4 @@ fn reconciliation_result_fields_correct() {
     assert_eq!(result.discrepancy, 0);
     assert!(result.is_reconciled);
 }
+
