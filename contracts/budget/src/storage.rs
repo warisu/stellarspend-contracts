@@ -79,6 +79,18 @@ pub struct BudgetCheckpoint {
     pub version: u32,
 }
 
+/// A historical snapshot of a user's budget configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BudgetConfigVersion {
+    pub version: u32,
+    pub categories: Map<Symbol, CategoryBudget>,
+    pub updated_at: u64,
+}
+
+/// Maximum number of budget config history entries kept per user.
+pub const MAX_CONFIG_HISTORY: u32 = 50;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
@@ -102,6 +114,8 @@ pub enum DataKey {
     Template(Symbol),
     UserTemplates(Address),
     BudgetCheckpoint(Address),
+    BudgetHistory(Address),
+    BudgetVersionCounter(Address),
 }
 
 pub fn get_user_budget(env: &Env, user: &Address) -> Option<UserBudget> {
@@ -369,4 +383,65 @@ pub fn delete_template(env: &Env, template_id: Symbol, user: &Address) {
             }
         }
     }
+}
+
+/// Records a new version of the user's budget configuration into history.
+/// Increments the version counter and trims history to MAX_CONFIG_HISTORY.
+pub fn save_budget_config_version(env: &Env, user: &Address, categories: &Map<Symbol, CategoryBudget>, updated_at: u64) {
+    let version: u32 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::BudgetVersionCounter(user.clone()))
+        .unwrap_or(0)
+        + 1;
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::BudgetVersionCounter(user.clone()), &version);
+
+    let entry = BudgetConfigVersion {
+        version,
+        categories: categories.clone(),
+        updated_at,
+    };
+
+    let mut history: Vec<BudgetConfigVersion> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::BudgetHistory(user.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+
+    history.push_back(entry);
+
+    // Trim to MAX_CONFIG_HISTORY
+    while history.len() > MAX_CONFIG_HISTORY {
+        let mut trimmed = Vec::new(env);
+        for i in 1..history.len() {
+            trimmed.push_back(history.get(i).unwrap());
+        }
+        history = trimmed;
+    }
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::BudgetHistory(user.clone()), &history);
+}
+
+/// Returns the full budget config history for a user (oldest first).
+pub fn get_budget_config_history(env: &Env, user: &Address) -> Vec<BudgetConfigVersion> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::BudgetHistory(user.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Returns a specific version from the user's budget config history, or None.
+pub fn get_budget_config_version(env: &Env, user: &Address, version: u32) -> Option<BudgetConfigVersion> {
+    let history = get_budget_config_history(env, user);
+    for entry in history.iter() {
+        if entry.version == version {
+            return Some(entry);
+        }
+    }
+    None
 }

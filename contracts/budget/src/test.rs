@@ -196,7 +196,7 @@ fn test_inactivity_timeout_and_ownership_transfer() {
     client.set_category_budget(&admin, &owner, &symbol_short!("food"), &1_000);
 
     let inheritance = soroban_sdk::vec![&env, beneficiary.clone()];
-    client.register_inheritance_beneficiaries(&owner, &inheritance);
+    client.set_inheritance_bens(&owner, &inheritance);
 
     client.set_inactivity_timeout(&owner, &10);
 
@@ -270,4 +270,100 @@ fn test_register_beneficiaries_invalid_percentages() {
     ];
 
     client.register_beneficiaries(&owner, &beneficiaries);
+}
+
+// ── Budget config history versioning (issue #621) ────────────────────────────
+
+#[test]
+fn test_budget_history_records_version_on_set_category() {
+    let (_, admin, user, client) = setup();
+    let food = symbol_short!("food");
+
+    // No history yet
+    assert_eq!(client.get_budget_history(&user).len(), 0);
+
+    client.set_category_budget(&admin, &user, &food, &1_000);
+    let history = client.get_budget_history(&user);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap().version, 1);
+}
+
+#[test]
+fn test_budget_history_version_increments() {
+    let (_, admin, user, client) = setup();
+    let food = symbol_short!("food");
+    let travel = symbol_short!("travel");
+
+    client.set_category_budget(&admin, &user, &food, &1_000);
+    client.set_category_budget(&admin, &user, &travel, &500);
+    client.set_category_budget(&admin, &user, &food, &2_000);
+
+    let history = client.get_budget_history(&user);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.get(0).unwrap().version, 1);
+    assert_eq!(history.get(1).unwrap().version, 2);
+    assert_eq!(history.get(2).unwrap().version, 3);
+}
+
+#[test]
+fn test_budget_history_timestamps_recorded() {
+    let (env, admin, user, client) = setup();
+    let food = symbol_short!("food");
+
+    env.ledger().set_timestamp(100);
+    client.set_category_budget(&admin, &user, &food, &1_000);
+
+    env.ledger().set_timestamp(200);
+    client.set_category_budget(&admin, &user, &food, &2_000);
+
+    let history = client.get_budget_history(&user);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history.get(0).unwrap().updated_at, 100);
+    assert_eq!(history.get(1).unwrap().updated_at, 200);
+}
+
+#[test]
+fn test_get_budget_version_retrieves_correct_snapshot() {
+    let (_, admin, user, client) = setup();
+    let food = symbol_short!("food");
+
+    client.set_category_budget(&admin, &user, &food, &1_000);
+    client.set_category_budget(&admin, &user, &food, &2_000);
+
+    let v1 = client.get_budget_version(&user, &1);
+    assert_eq!(v1.version, 1);
+    assert_eq!(v1.categories.get(food.clone()).unwrap().limit, 1_000);
+
+    let v2 = client.get_budget_version(&user, &2);
+    assert_eq!(v2.version, 2);
+    assert_eq!(v2.categories.get(food).unwrap().limit, 2_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_get_budget_version_not_found_panics() {
+    let (_, _, user, client) = setup();
+    client.get_budget_version(&user, &99);
+}
+
+#[test]
+fn test_budget_history_queryable_after_multiple_changes() {
+    let (_, admin, user, client) = setup();
+    let food = symbol_short!("food");
+    let travel = symbol_short!("travel");
+    let rent = symbol_short!("rent");
+
+    client.set_category_budget(&admin, &user, &food, &500);
+    client.set_category_budget(&admin, &user, &travel, &300);
+    client.set_category_budget(&admin, &user, &rent, &1_200);
+    client.set_category_budget(&admin, &user, &food, &800);
+
+    let history = client.get_budget_history(&user);
+    assert_eq!(history.len(), 4);
+
+    // Latest version should reflect food=800, travel=300, rent=1200
+    let latest = history.get(3).unwrap();
+    assert_eq!(latest.categories.get(food).unwrap().limit, 800);
+    assert_eq!(latest.categories.get(travel).unwrap().limit, 300);
+    assert_eq!(latest.categories.get(rent).unwrap().limit, 1_200);
 }

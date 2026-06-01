@@ -17,9 +17,9 @@ use soroban_sdk::{
 };
 
 pub use storage::{
-    BudgetCheckpoint, BudgetFreeze, BudgetTemplate, CategoryBudget, CategoryTransfer, DataKey,
-    SpendingWindow, UserBudget, DEFAULT_FREEZE_DURATION_SECONDS, RAPID_SPEND_THRESHOLD,
-    RAPID_SPEND_WINDOW_SECONDS,
+    BudgetCheckpoint, BudgetConfigVersion, BudgetFreeze, BudgetTemplate, CategoryBudget,
+    CategoryTransfer, DataKey, SpendingWindow, UserBudget, DEFAULT_FREEZE_DURATION_SECONDS,
+    RAPID_SPEND_THRESHOLD, RAPID_SPEND_WINDOW_SECONDS,
 };
 
 pub use types::Beneficiary;
@@ -29,6 +29,7 @@ use storage::{
     get_transfer, get_user_budget as load_user_budget, get_user_templates, get_user_transfers,
     increment_suspicious_count, is_budget_frozen, next_transfer_id, record_spend_timestamp,
     record_transfer, save_template, set_budget_freeze, set_user_budget,
+    save_budget_config_version, get_budget_config_history, get_budget_config_version,
 };
 
 /// Deletion cooldown period in seconds (24 hours).
@@ -295,6 +296,12 @@ impl BudgetContract {
 
         storage::set_last_activity(&env, &user, current_time);
 
+        // Record a version snapshot of the current category config (if any) so
+        // the overall budget amount change is also captured in history.
+        if let Some(user_budget) = storage::get_user_budget(&env, &user) {
+            save_budget_config_version(&env, &user, &user_budget.categories, current_time);
+        }
+
         env.events().publish(
             (symbol_short!("budget"), symbol_short!("updated")),
             (user, amount, current_time),
@@ -340,12 +347,11 @@ impl BudgetContract {
         budget.last_updated = now;
         set_user_budget(&env, &budget);
 
+        save_budget_config_version(&env, &user, &budget.categories, now);
         storage::set_last_activity(&env, &user, now);
 
         BudgetEvents::category_budget_set(&env, &user, &category, limit);
     }
-
-    /// Transfers unused funds from one category to another.
     pub fn transfer_between_categories(
         env: Env,
         user: Address,
@@ -643,6 +649,18 @@ impl BudgetContract {
         get_user_transfers(&env, &user)
     }
 
+    /// Returns the full budget configuration history for a user (oldest first).
+    pub fn get_budget_history(env: Env, user: Address) -> Vec<BudgetConfigVersion> {
+        get_budget_config_history(&env, &user)
+    }
+
+    /// Returns a specific budget configuration version for a user, or panics if not found.
+    pub fn get_budget_version(env: Env, user: Address, version: u32) -> BudgetConfigVersion {
+        get_budget_config_version(&env, &user, version).unwrap_or_else(|| {
+            panic_with_error!(&env, BudgetError::BudgetNotFound);
+        })
+    }
+
     /// Returns whether the user's budget is currently frozen.
     pub fn is_frozen(env: Env, user: Address) -> bool {
         is_budget_frozen(&env, &user, env.ledger().timestamp())
@@ -722,7 +740,7 @@ impl BudgetContract {
     }
 
     /// Registers inheritance beneficiaries for ownership transfer.
-    pub fn register_inheritance_beneficiaries(
+    pub fn set_inheritance_bens(
         env: Env,
         user: Address,
         beneficiaries: Vec<Address>,

@@ -36,6 +36,7 @@ members = [
     "contracts/transaction-validation",
     "contracts/merchant-tagging",
     "contracts/currency-conversion",
+    "contracts/benchmarks",
 ]
 
 [package]
