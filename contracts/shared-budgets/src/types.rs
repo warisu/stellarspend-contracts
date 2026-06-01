@@ -8,6 +8,7 @@ pub const MAX_BUDGET_MEMBERS: u32 = 20;
 /// Maximum number of spending rules allowed in a budget.
 pub const MAX_SPENDING_RULES: u32 = 10;
 
+
 /// Represents a shared budget with multiple members.
 #[derive(Clone, Debug)]
 #[contracttype]
@@ -182,3 +183,4 @@ impl SharedBudgetEvents {
             .publish(topics, (previous_owner.clone(), new_owner.clone()));
     }
 }
+

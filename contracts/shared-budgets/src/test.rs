@@ -422,3 +422,87 @@ fn test_unauthorized_budget_ownership_transfer() {
 
     client.transfer_budget_ownership(&impostor, &budget_id, &new_owner);
 }
+
+#[test]
+fn test_get_contributions_empty() {
+    let (env, _admin, token, _token_client, client) = setup_test_env();
+    let creator = Address::generate(&env);
+    let budget_id = client.create_budget(
+        &creator,
+        &Symbol::new(&env, "empty_budget"),
+        &Vec::new(&env),
+        &token,
+        &Vec::new(&env),
+    );
+
+    let contribs = client.get_contributions(&budget_id);
+    assert_eq!(contribs.len(), 0);
+}
+
+#[test]
+fn test_get_contributions_multiple() {
+    let (env, _admin, token, _token_client, client) = setup_test_env();
+    let creator = Address::generate(&env);
+    let member = Address::generate(&env);
+
+    let mut members: Vec<Address> = Vec::new(&env);
+    members.push_back(member.clone());
+
+    let budget_id = client.create_budget(
+        &creator,
+        &Symbol::new(&env, "multi_budget"),
+        &members,
+        &token,
+        &Vec::new(&env),
+    );
+
+    client.contribute_to_budget(&member, &budget_id, &100_000_000_i128, &None);
+    client.contribute_to_budget(
+        &member,
+        &budget_id,
+        &200_000_000_i128,
+        &Some(Symbol::new(&env, "second")),
+    );
+
+    let contribs = client.get_contributions(&budget_id);
+    assert_eq!(contribs.len(), 2);
+    assert_eq!(contribs.get(0).unwrap().amount, 100_000_000);
+    assert_eq!(contribs.get(0).unwrap().contributor, member);
+    assert_eq!(contribs.get(1).unwrap().amount, 200_000_000);
+    assert_eq!(contribs.get(1).unwrap().memo, Some(Symbol::new(&env, "second")));
+}
+
+#[test]
+fn test_get_contributions_isolated_per_budget() {
+    // Contributions from budget A must not appear in budget B
+    let (env, _admin, token, _token_client, client) = setup_test_env();
+    let creator = Address::generate(&env);
+    let contributor = Address::generate(&env);
+
+    let budget_a = client.create_budget(
+        &creator,
+        &Symbol::new(&env, "budget_a"),
+        &Vec::new(&env),
+        &token,
+        &Vec::new(&env),
+    );
+    let budget_b = client.create_budget(
+        &creator,
+        &Symbol::new(&env, "budget_b"),
+        &Vec::new(&env),
+        &token,
+        &Vec::new(&env),
+    );
+
+    client.contribute_to_budget(&contributor, &budget_a, &50_000_000_i128, &None);
+
+    assert_eq!(client.get_contributions(&budget_a).len(), 1);
+    assert_eq!(client.get_contributions(&budget_b).len(), 0);
+}
+
+#[test]
+#[should_panic]
+fn test_get_contributions_nonexistent_budget() {
+    let (_env, _admin, _token, _token_client, client) = setup_test_env();
+    client.get_contributions(&9999_u64);
+}
