@@ -29,6 +29,15 @@ pub struct MonthlyAnalytics {
     pub last_updated: u64,
 }
 
+/// Time filter for analytics queries.
+/// Allows filtering by start and end ledger timestamps.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeFilter {
+    pub start_timestamp: u64,
+    pub end_timestamp: u64,
+}
+
 /// Storage keys for the contract
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

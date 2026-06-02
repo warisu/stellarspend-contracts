@@ -10,7 +10,7 @@ mod test;
 pub mod types;
 
 use crate::events::emit_spending_updated;
-use crate::types::{CategorySpend, CategorySpending, DataKey, MonthlyAnalytics};
+use crate::types::{CategorySpend, CategorySpending, DataKey, MonthlyAnalytics, TimeFilter};
 
 #[contract]
 pub struct CategoryAnalytics;
@@ -105,6 +105,80 @@ impl CategoryAnalytics {
                 category.clone(),
                 year,
                 month,
+            );
+            total_volume = total_volume
+                .checked_add(analytics.volume)
+                .expect("volume overflow");
+            total_count += analytics.count;
+        }
+
+        CategorySpending {
+            count: total_count,
+            volume: total_volume,
+        }
+    }
+
+    /// Retrieves analytics for a user and category in a specific month with time filtering.
+    ///
+    /// Filters metrics to ensure they fall within the specified `time_filter` range.
+    /// Results outside the range are excluded, and empty ranges (start > end) return
+    /// empty results without panicking.
+    pub fn get_category_metrics_filtered(
+        env: Env,
+        user: Address,
+        category: Symbol,
+        year: u32,
+        month: u32,
+        time_filter: TimeFilter,
+    ) -> MonthlyAnalytics {
+        let analytics = Self::get_category_metrics(
+            env.clone(),
+            user.clone(),
+            category.clone(),
+            year,
+            month,
+        );
+
+        // Check if the analytics entry is within the time range
+        if analytics.last_updated >= time_filter.start_timestamp
+            && analytics.last_updated <= time_filter.end_timestamp
+        {
+            analytics
+        } else {
+            MonthlyAnalytics {
+                user,
+                category,
+                year,
+                month,
+                volume: 0,
+                count: 0,
+                last_updated: 0,
+            }
+        }
+    }
+
+    /// Aggregates yearly trend for a user and category with time filtering.
+    ///
+    /// Excludes month metrics that do not fall within the `time_filter` range.
+    /// Empty ranges return zero totals without panicking.
+    pub fn get_yearly_trend_filtered(
+        env: Env,
+        user: Address,
+        category: Symbol,
+        year: u32,
+        time_filter: TimeFilter,
+    ) -> CategorySpending {
+        let mut total_volume: i128 = 0;
+        let mut total_count: u32 = 0;
+
+        for month in 1..=12 {
+            let analytics = Self::get_category_metrics_filtered(
+                env.clone(),
+                user.clone(),
+                category.clone(),
+                year,
+                month,
+                time_filter.clone(),
             );
             total_volume = total_volume
                 .checked_add(analytics.volume)
