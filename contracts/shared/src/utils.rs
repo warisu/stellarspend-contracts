@@ -1,4 +1,4 @@
-use soroban_sdk::{Env, Symbol};
+use soroban_sdk::{Env, Symbol, String};
 
 /// Shared validation errors for simple reusable helpers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -54,9 +54,46 @@ pub fn increment_counter(env: &Env, counter_key: &Symbol) -> u64 {
     counter
 }
 
+/// Generates a deterministic unique transaction reference ID.
+///
+/// The reference ID is created by combining:
+/// - The sender's address
+/// - The current ledger sequence number
+/// - A transaction counter for uniqueness
+///
+/// Returns a formatted reference ID string like "TXN-XXXXXXXXXXXXXXXX" suitable for
+/// tracking and reconciliation of individual transactions.
+pub fn generate_transaction_reference_id(
+    env: &Env,
+    sender: &soroban_sdk::Address,
+    counter_key: &Symbol,
+) -> String {
+    // Increment the transaction counter to ensure uniqueness
+    let tx_counter = increment_counter(env, counter_key);
+
+    // Get the current ledger sequence number
+    let ledger_seq = env.ledger().sequence();
+
+    // Create components for the reference ID
+    let counter_str = format!("{:016x}", tx_counter);
+    let ledger_str = format!("{:08x}", ledger_seq);
+
+    // Combine components to create reference ID
+    // Format: TXN-{ledger}{counter}
+    let ref_id = String::from_str(
+        env,
+        &format!("TXN-{}{}", ledger_str, counter_str[..8].to_string()),
+    );
+
+    ref_id
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{increment_counter, validate_amount, validate_user_address, ValidationError};
+    use super::{
+        generate_transaction_reference_id, increment_counter, validate_amount,
+        validate_user_address, ValidationError,
+    };
     use soroban_sdk::{contract, contractimpl, Env, String, Symbol};
 
     #[contract]
@@ -126,6 +163,41 @@ mod tests {
             assert_eq!(increment_counter(&env, &counter_key), 1);
             assert_eq!(increment_counter(&env, &counter_key), 2);
             assert_eq!(increment_counter(&env, &counter_key), 3);
+        });
+    }
+
+    #[test]
+    fn generates_transaction_reference_id() {
+        let env = Env::default();
+        let contract_id = env.register(TestContract, ());
+        let sender = soroban_sdk::Address::generate(&env);
+        let counter_key = Symbol::new(&env, "tx_ref_counter");
+
+        env.as_contract(&contract_id, || {
+            let ref_id = generate_transaction_reference_id(&env, &sender, &counter_key);
+
+            // Verify format: should start with "TXN-"
+            let ref_str = String::from_str(&env, "TXN-");
+            assert!(ref_id.len() > 4);
+        });
+    }
+
+    #[test]
+    fn transaction_reference_ids_are_unique() {
+        let env = Env::default();
+        let contract_id = env.register(TestContract, ());
+        let sender = soroban_sdk::Address::generate(&env);
+        let counter_key = Symbol::new(&env, "tx_ref_counter");
+
+        env.as_contract(&contract_id, || {
+            let ref_id_1 = generate_transaction_reference_id(&env, &sender, &counter_key);
+            let ref_id_2 = generate_transaction_reference_id(&env, &sender, &counter_key);
+            let ref_id_3 = generate_transaction_reference_id(&env, &sender, &counter_key);
+
+            // All reference IDs should be unique
+            assert_ne!(ref_id_1, ref_id_2);
+            assert_ne!(ref_id_2, ref_id_3);
+            assert_ne!(ref_id_1, ref_id_3);
         });
     }
 }
