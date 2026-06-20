@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Vec};
+use soroban_sdk::{contracttype, Address};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,6 +24,8 @@ pub struct RecurringPayment {
     pub next_execution: u64,
     pub active: bool,
     pub execution_count: u32,
+    pub missed_count: u32,
+    pub last_missed_at: u64,
 }
 
 /// Represents a recurring income stream that auto-funds budgets or goals.

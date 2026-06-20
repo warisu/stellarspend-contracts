@@ -93,13 +93,21 @@ impl RecurringPaymentContract {
             panic!("Too early for next execution");
         }
 
-        // Attempt token transfer; track missed execution on failure
+        payment.sender.require_auth();
+
+        // Attempt token transfer; track missed execution on failure.
         let token_client = token::Client::new(&env, &payment.token);
         let sender_balance = token_client.balance(&payment.sender);
+        let now = env.ledger().timestamp();
+
         if sender_balance < payment.amount {
-            // Track the missed execution
-            payment.missed_count += 1;
-            payment.last_missed_at = env.ledger().timestamp();
+            payment.missed_count = payment.missed_count.saturating_add(1);
+            payment.last_missed_at = now;
+            payment.next_execution = payment.next_execution.saturating_add(payment.interval);
+            if payment.next_execution <= current_time {
+                let intervals_passed = (current_time - payment.next_execution) / payment.interval;
+                payment.next_execution += (intervals_passed + 1) * payment.interval;
+            }
             env.storage()
                 .instance()
                 .set(&DataKey::Payment(payment_id), &payment);
@@ -107,11 +115,12 @@ impl RecurringPaymentContract {
                 (symbol_short!("recur"), symbol_short!("missed"), payment_id),
                 (payment.missed_count, payment.last_missed_at),
             );
-            panic!("Insufficient funds for payment");
+            return;
         }
+
         token_client.transfer(&payment.sender, &payment.recipient, &payment.amount);
 
-        // Reset missed count on successful execution
+        // Reset missed count on successful execution.
         payment.missed_count = 0;
         payment.last_missed_at = 0;
 
