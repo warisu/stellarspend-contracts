@@ -215,11 +215,7 @@ impl RecurringPaymentContract {
             .set(&DataKey::Payment(payment_id), &payment);
 
         env.events().publish(
-            (
-                symbol_short!("recur"),
-                symbol_short!("paused"),
-                payment_id,
-            ),
+            (symbol_short!("recur"), symbol_short!("paused"), payment_id),
             payment.sender,
         );
     }
@@ -249,11 +245,7 @@ impl RecurringPaymentContract {
             .set(&DataKey::Payment(payment_id), &payment);
 
         env.events().publish(
-            (
-                symbol_short!("recur"),
-                symbol_short!("resumed"),
-                payment_id,
-            ),
+            (symbol_short!("recur"), symbol_short!("resumed"), payment_id),
             payment.sender,
         );
     }
