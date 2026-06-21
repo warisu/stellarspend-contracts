@@ -28,13 +28,16 @@ mod validation;
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, Symbol, Vec};
 
 pub use crate::types::{
-    BatchGoalMetrics, BatchGoalResult, BatchMilestoneMetrics, BatchMilestoneResult, DataKey,
-    ErrorCode, GoalEvents, GoalResult, MilestoneAchievement, MilestoneAchievementRequest,
-    MilestoneResult, SavingsGoal, SavingsGoalProgress, SavingsGoalRequest, MAX_BATCH_SIZE,
+    BatchGoalMetrics, BatchGoalResult, BatchMilestoneMetrics, BatchMilestoneResult,
+    ContributionRecord, DataKey, ErrorCode, GoalEvents, GoalResult, GoalSnapshot,
+    MilestoneAchievement, MilestoneAchievementRequest, MilestoneResult, SavingsGoal,
+    SavingsGoalProgress, SavingsGoalRequest, MAX_BATCH_SIZE, REVERSAL_PERIOD_SECS,
 };
 use crate::validation::{
     validate_goal_name_unique, validate_goal_request, validate_milestone_request,
 };
+
+const PERSISTENT_TTL_BUMP: u32 = 12_614_400;
 
 /// Error codes for the savings goals contract.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -50,18 +53,28 @@ pub enum SavingsGoalError {
     EmptyBatch = 4,
     /// Batch exceeds maximum size
     BatchTooLarge = 5,
+    /// Goal is closed (target met) and no longer accepts contributions
+    GoalClosed = 6,
     /// Insufficient balance for withdrawal
-    InsufficientBalance = 6,
+    InsufficientBalance = 7,
     /// Goal is not active
-    GoalNotActive = 7,
+    GoalNotActive = 8,
     /// Invalid goal name
-    InvalidGoalName = 8,
+    InvalidGoalName = 9,
     /// Invalid contribution or withdrawal amount
-    InvalidAmount = 9,
+    InvalidAmount = 10,
     /// Goal not found
-    GoalNotFound = 10,
+    GoalNotFound = 11,
     /// Goal is locked against withdrawals
-    GoalLocked = 11,
+    GoalLocked = 12,
+    /// Goal has expired
+    GoalExpired = 13,
+    /// One or more prerequisite goals are not complete
+    DependencyNotMet = 14,
+    /// Reversal window has elapsed
+    ReversalExpired = 15,
+    /// No contribution found with the given ID
+    ContributionNotFound = 16,
 }
 
 impl From<SavingsGoalError> for soroban_sdk::Error {
@@ -342,14 +355,18 @@ impl SavingsGoalsContract {
                     // Validation succeeded - create the goal
                     goal_id_counter += 1;
 
-                    let is_complete = request.initial_contribution >= request.target_amount;
                     let created_at = env.ledger().timestamp();
                     let unlock_at = if request.lock_duration_seconds > 0 {
                         created_at.saturating_add(request.lock_duration_seconds)
                     } else {
                         0
                     };
-                    let goal = SavingsGoal {
+                    let expires_at = if request.expiration_seconds > 0 {
+                        created_at.saturating_add(request.expiration_seconds)
+                    } else {
+                        0
+                    };
+                    let mut goal = SavingsGoal {
                         goal_id: goal_id_counter,
                         user: request.user.clone(),
                         goal_name: request.goal_name.clone(),
@@ -358,8 +375,10 @@ impl SavingsGoalsContract {
                         deadline: request.deadline,
                         created_at,
                         is_active: true,
-                        is_complete,
+                        is_complete: false,
                         unlock_at,
+                        expires_at,
+                        penalty_bps: request.penalty_bps,
                     };
 
                     // Accumulate metrics
@@ -382,6 +401,11 @@ impl SavingsGoalsContract {
                     );
                     // Emit milestone events for initial contribution
                     Self::check_and_emit_milestones(&env, goal_id_counter);
+
+                    // Update local goal variable's is_complete if it reached target
+                    if request.initial_contribution >= request.target_amount {
+                        goal.is_complete = true;
+                    }
 
                     // Update user's goal list
                     let mut user_goals: Vec<u64> = env
@@ -485,7 +509,8 @@ impl SavingsGoalsContract {
     }
 
     /// Contributes funds to a savings goal and emits milestone events at 25/50/75/100%.
-    pub fn contribute_to_goal(env: Env, caller: Address, goal_id: u64, amount: i128) -> i128 {
+    /// Returns the contribution ID, which can be used to reverse the contribution within the reversal window.
+    pub fn contribute_to_goal(env: Env, caller: Address, goal_id: u64, amount: i128) -> u64 {
         caller.require_auth();
 
         if amount <= 0 {
@@ -501,21 +526,253 @@ impl SavingsGoalsContract {
         if goal.user != caller {
             panic_with_error!(&env, SavingsGoalError::Unauthorized);
         }
+
+        // Check if goal has expired
+        let current_time = env.ledger().timestamp();
+        if goal.expires_at > 0 && current_time >= goal.expires_at {
+            // Mark goal as inactive
+            goal.is_active = false;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Goal(goal_id), &goal);
+            panic_with_error!(&env, SavingsGoalError::GoalExpired);
+        }
+
         if !goal.is_active {
             panic_with_error!(&env, SavingsGoalError::GoalNotActive);
         }
 
-        goal.current_amount = goal.current_amount.checked_add(amount).unwrap_or(i128::MAX);
+        // Enforce prerequisite goals: cannot contribute until all prerequisites complete
+        let prereqs: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GoalPrereqs(goal_id))
+            .unwrap_or(Vec::new(&env));
+        for pid in prereqs.iter() {
+            let pgoal_opt: Option<SavingsGoal> =
+                env.storage().persistent().get(&DataKey::Goal(pid));
+            if let Some(pgoal) = pgoal_opt {
+                if !pgoal.is_complete {
+                    panic_with_error!(&env, SavingsGoalError::DependencyNotMet);
+                }
+            } else {
+                panic_with_error!(&env, SavingsGoalError::GoalNotFound);
+            }
+        }
+
+        // Apply contribution, capped at target to avoid overflow accumulation
+        let new_amount = goal.current_amount.checked_add(amount).unwrap_or(i128::MAX);
+        let actual_contribution = if new_amount > goal.target_amount {
+            goal.target_amount.saturating_sub(goal.current_amount)
+        } else {
+            amount
+        };
+        goal.current_amount = if new_amount > goal.target_amount {
+            goal.target_amount
+        } else {
+            new_amount
+        };
         goal.is_complete = goal.current_amount >= goal.target_amount;
 
         env.storage()
             .persistent()
             .set(&DataKey::Goal(goal_id), &goal);
 
+        // Store contribution record for reversal eligibility tracking
+        let contrib_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LastContribId(goal_id))
+            .unwrap_or(0)
+            + 1;
+        let record = ContributionRecord {
+            amount: actual_contribution,
+            contributed_at: current_time,
+            reversed: false,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Contribution(goal_id, contrib_id), &record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastContribId(goal_id), &contrib_id);
+
         Self::check_and_emit_milestones(&env, goal_id);
-        GoalEvents::goal_contributed(&env, goal_id, &caller, amount, goal.current_amount);
+        GoalEvents::goal_contributed(
+            &env,
+            goal_id,
+            &caller,
+            actual_contribution,
+            goal.current_amount,
+        );
+
+        contrib_id
+    }
+
+    /// Reverses a contribution within the reversal period (REVERSAL_PERIOD_SECS).
+    ///
+    /// # Arguments
+    /// * `caller`       - Must be the goal owner.
+    /// * `goal_id`      - The goal that was contributed to.
+    /// * `contrib_id`   - The contribution ID returned by `contribute_to_goal`.
+    ///
+    /// # Errors
+    /// * `GoalNotFound`        - Goal does not exist.
+    /// * `Unauthorized`        - Caller is not the goal owner.
+    /// * `ContributionNotFound`- Contribution ID unknown or already reversed.
+    /// * `ReversalExpired`     - The reversal window has closed.
+    pub fn reverse_contribution(env: Env, caller: Address, goal_id: u64, contrib_id: u64) -> i128 {
+        caller.require_auth();
+
+        let mut goal: SavingsGoal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Goal(goal_id))
+            .unwrap_or_else(|| panic_with_error!(&env, SavingsGoalError::GoalNotFound));
+
+        if goal.user != caller {
+            panic_with_error!(&env, SavingsGoalError::Unauthorized);
+        }
+
+        let mut record: ContributionRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Contribution(goal_id, contrib_id))
+            .unwrap_or_else(|| panic_with_error!(&env, SavingsGoalError::ContributionNotFound));
+
+        if record.reversed {
+            panic_with_error!(&env, SavingsGoalError::ContributionNotFound);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > record.contributed_at.saturating_add(REVERSAL_PERIOD_SECS) {
+            panic_with_error!(&env, SavingsGoalError::ReversalExpired);
+        }
+
+        goal.current_amount = goal.current_amount.saturating_sub(record.amount);
+        goal.is_complete = goal.current_amount >= goal.target_amount;
+        record.reversed = true;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Contribution(goal_id, contrib_id), &record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Goal(goal_id), &goal);
 
         goal.current_amount
+    }
+
+    /// Clones an existing savings goal with a new name and zero balance.
+    pub fn clone_savings_goal(
+        env: Env,
+        caller: Address,
+        goal_id: u64,
+        new_goal_name: Symbol,
+    ) -> u64 {
+        caller.require_auth();
+
+        let existing_goal: SavingsGoal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Goal(goal_id))
+            .unwrap_or_else(|| panic_with_error!(&env, SavingsGoalError::GoalNotFound));
+
+        if existing_goal.user != caller {
+            panic_with_error!(&env, SavingsGoalError::Unauthorized);
+        }
+
+        // Check for duplicate goal name for this user
+        if validate_goal_name_unique(&env, &caller, &new_goal_name).is_err() {
+            panic_with_error!(&env, SavingsGoalError::InvalidGoalName);
+        }
+
+        let mut goal_id_counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LastGoalId)
+            .unwrap_or(0);
+        goal_id_counter += 1;
+
+        let created_at = env.ledger().timestamp();
+        // Inherit lock duration if it was originally set
+        let lock_duration = if existing_goal.unlock_at > existing_goal.created_at {
+            existing_goal.unlock_at - existing_goal.created_at
+        } else {
+            0
+        };
+        let unlock_at = if lock_duration > 0 {
+            created_at.saturating_add(lock_duration)
+        } else {
+            0
+        };
+
+        // Inherit expiration duration if it was originally set
+        let expiration_duration = if existing_goal.expires_at > existing_goal.created_at {
+            existing_goal.expires_at - existing_goal.created_at
+        } else {
+            0
+        };
+        let expires_at = if expiration_duration > 0 {
+            created_at.saturating_add(expiration_duration)
+        } else {
+            0
+        };
+
+        let new_goal = SavingsGoal {
+            goal_id: goal_id_counter,
+            user: caller.clone(),
+            goal_name: new_goal_name.clone(),
+            target_amount: existing_goal.target_amount,
+            current_amount: 0, // Reset balance
+            deadline: existing_goal.deadline,
+            created_at,
+            is_active: true,
+            is_complete: false,
+            unlock_at,
+            expires_at,
+            penalty_bps: existing_goal.penalty_bps,
+        };
+
+        // Store the goal
+        env.storage()
+            .persistent()
+            .set(&DataKey::Goal(goal_id_counter), &new_goal);
+        // Store name-to-id mapping
+        env.storage().persistent().set(
+            &DataKey::GoalByName(caller.clone(), new_goal_name.clone()),
+            &goal_id_counter,
+        );
+
+        // Update user's goal list
+        let mut user_goals: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UserGoals(caller.clone()))
+            .unwrap_or(Vec::new(&env));
+        user_goals.push_back(goal_id_counter);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserGoals(caller.clone()), &user_goals);
+
+        // Update global counter
+        env.storage()
+            .instance()
+            .set(&DataKey::LastGoalId, &goal_id_counter);
+
+        let total_goals: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalGoalsCreated)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalGoalsCreated, &(total_goals + 1));
+
+        // Emit creation event (reusing batch 0 for manual creation)
+        GoalEvents::goal_created(&env, 0, &new_goal);
+
+        goal_id_counter
     }
 
     /// Withdraws funds from a savings goal. Rejects withdrawals before unlock time when locked.
@@ -535,7 +792,7 @@ impl SavingsGoalsContract {
         if goal.user != caller {
             panic_with_error!(&env, SavingsGoalError::Unauthorized);
         }
-        if !goal.is_active {
+        if !goal.is_active && !goal.is_complete {
             panic_with_error!(&env, SavingsGoalError::GoalNotActive);
         }
 
@@ -545,11 +802,18 @@ impl SavingsGoalsContract {
             panic_with_error!(&env, SavingsGoalError::GoalLocked);
         }
 
-        if amount > goal.current_amount {
+        let penalty = if goal.is_complete {
+            0
+        } else {
+            (amount * goal.penalty_bps as i128) / 10_000
+        };
+        let gross_amount = amount.checked_add(penalty).unwrap_or(i128::MAX);
+
+        if gross_amount > goal.current_amount {
             panic_with_error!(&env, SavingsGoalError::InsufficientBalance);
         }
 
-        goal.current_amount -= amount;
+        goal.current_amount -= gross_amount;
         goal.is_complete = goal.current_amount >= goal.target_amount;
 
         env.storage()
@@ -595,6 +859,7 @@ impl SavingsGoalsContract {
         } else {
             0
         };
+        let mut newly_triggered_100 = false;
         if progress > 100 {
             progress = 100;
         }
@@ -604,17 +869,46 @@ impl SavingsGoalsContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::Goal(goal_id), &goal);
+            if is_complete {
+                GoalEvents::goal_completed(env, goal_id, &goal.user, goal.target_amount);
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::Goal(goal_id), &goal);
         }
         for &milestone in milestones.iter() {
             if progress >= milestone && !triggered.contains(&milestone) {
                 // Emit event
                 GoalEvents::milestone_achieved_percent(env, goal_id, milestone);
                 triggered.push_back(milestone);
+                if milestone == 100 {
+                    newly_triggered_100 = true;
+                }
             }
         }
         env.storage()
             .persistent()
             .set(&DataKey::GoalMilestonesPercent(goal_id), &triggered);
+
+        // Auto-close the goal the first time 100% is reached
+        if newly_triggered_100 && goal.is_active {
+            let mut closed_goal = goal;
+            closed_goal.is_active = false;
+            let closed_at = env.ledger().sequence() as u64;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Goal(goal_id), &closed_goal);
+            env.storage()
+                .persistent()
+                .set(&DataKey::GoalClosedAt(goal_id), &closed_at);
+            GoalEvents::goal_closed(
+                env,
+                goal_id,
+                &closed_goal.user,
+                closed_goal.current_amount,
+                closed_at,
+            );
+        }
     }
     // ...existing code...
 
@@ -646,8 +940,8 @@ impl SavingsGoalsContract {
             panic_with_error!(&env, SavingsGoalError::Unauthorized);
         }
 
-        // Verify goal is active
-        if !goal.is_active {
+        // Verify goal is active or already complete
+        if !goal.is_active && !goal.is_complete {
             panic_with_error!(&env, SavingsGoalError::GoalNotActive);
         }
 
@@ -657,13 +951,20 @@ impl SavingsGoalsContract {
             panic_with_error!(&env, SavingsGoalError::GoalLocked);
         }
 
-        // Verify sufficient balance
-        if amount > goal.current_amount {
+        let penalty = if goal.is_complete {
+            0
+        } else {
+            (amount * goal.penalty_bps as i128) / 10_000
+        };
+        let gross_amount = amount.checked_add(penalty).unwrap_or(i128::MAX);
+
+        // Verify sufficient balance including penalty
+        if gross_amount > goal.current_amount {
             panic_with_error!(&env, SavingsGoalError::InsufficientBalance);
         }
 
         // Update current amount
-        goal.current_amount = goal.current_amount.checked_sub(amount).unwrap_or(0);
+        goal.current_amount = goal.current_amount.checked_sub(gross_amount).unwrap_or(0);
 
         // Update completion status
         let was_complete = goal.is_complete;
@@ -799,6 +1100,78 @@ impl SavingsGoalsContract {
         }
     }
 
+    /// Records a historical snapshot of the goal's current progress.
+    ///
+    /// The caller must be the goal owner. Emits an event on success.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - The address recording the snapshot (must be goal owner)
+    /// * `goal_id` - The ID of the goal
+    pub fn record_goal_snapshot(env: Env, caller: Address, goal_id: u64) {
+        caller.require_auth();
+
+        let goal: SavingsGoal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Goal(goal_id))
+            .unwrap_or_else(|| panic_with_error!(&env, SavingsGoalError::GoalNotFound));
+
+        // Verify caller is the goal owner
+        if goal.user != caller {
+            panic_with_error!(&env, SavingsGoalError::Unauthorized);
+        }
+
+        let now = env.ledger().timestamp();
+        let snapshot = GoalSnapshot {
+            goal_id,
+            amount: goal.current_amount,
+            timestamp: now,
+        };
+
+        let mut snapshots: Vec<GoalSnapshot> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GoalSnapshots(goal_id))
+            .unwrap_or(Vec::new(&env));
+
+        snapshots.push_back(snapshot);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::GoalSnapshots(goal_id), &snapshots);
+
+        env.storage().persistent().extend_ttl(
+            &DataKey::GoalSnapshots(goal_id),
+            PERSISTENT_TTL_BUMP,
+            PERSISTENT_TTL_BUMP,
+        );
+
+        GoalEvents::goal_snapshot_recorded(&env, goal_id, goal.current_amount, now);
+    }
+
+    /// Retrieves all historical snapshots for a specific goal.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `goal_id` - The goal ID
+    ///
+    /// # Returns
+    /// * `Vec<GoalSnapshot>` - Vector of historical snapshots
+    pub fn get_goal_snapshots(env: Env, goal_id: u64) -> Vec<GoalSnapshot> {
+        let key = DataKey::GoalSnapshots(goal_id);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_TTL_BUMP, PERSISTENT_TTL_BUMP);
+        }
+
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env))
+    }
+
     /// Returns the admin address.
     pub fn get_admin(env: Env) -> Address {
         env.storage()
@@ -892,6 +1265,14 @@ impl SavingsGoalsContract {
             .unwrap_or(0)
     }
 
+    /// Returns the ledger sequence at which a goal was automatically closed,
+    /// or `None` if the goal has not yet been closed.
+    pub fn get_goal_closed_at(env: Env, goal_id: u64) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::GoalClosedAt(goal_id))
+    }
+
     // Internal helper to verify admin
     fn require_admin(env: &Env, caller: &Address) {
         let admin: Address = env
@@ -903,6 +1284,81 @@ impl SavingsGoalsContract {
         if *caller != admin {
             panic_with_error!(env, SavingsGoalError::Unauthorized);
         }
+    }
+
+    /// Sets prerequisite goal IDs for a specific goal. The caller must be the goal owner.
+    /// Prevents circular dependencies when setting prerequisites.
+    pub fn set_goal_prerequisites(env: Env, caller: Address, goal_id: u64, prereq_ids: Vec<u64>) {
+        caller.require_auth();
+
+        let goal: SavingsGoal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Goal(goal_id))
+            .unwrap_or_else(|| panic_with_error!(&env, SavingsGoalError::GoalNotFound));
+
+        if goal.user != caller {
+            panic_with_error!(&env, SavingsGoalError::Unauthorized);
+        }
+
+        // Validate prerequisites exist, belong to the same owner, and do not form cycles
+        for p in prereq_ids.iter() {
+            if p == goal_id {
+                panic_with_error!(&env, SavingsGoalError::DependencyNotMet);
+            }
+
+            let pgoal: SavingsGoal = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Goal(p))
+                .unwrap_or_else(|| panic_with_error!(&env, SavingsGoalError::GoalNotFound));
+
+            if pgoal.user != caller {
+                // Disallow cross-user prerequisites
+                panic_with_error!(&env, SavingsGoalError::Unauthorized);
+            }
+
+            // Check for circular dependency: is there a path from p -> goal_id ?
+            if Self::has_dependency_path(&env, p, goal_id) {
+                panic_with_error!(&env, SavingsGoalError::DependencyNotMet);
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::GoalPrereqs(goal_id), &prereq_ids);
+    }
+
+    // Depth-first search to detect if there's a path from `start` to `target`.
+    fn has_dependency_path(env: &Env, start: u64, target: u64) -> bool {
+        let mut stack: Vec<u64> = Vec::new(env);
+        let mut visited: Vec<u64> = Vec::new(env);
+        stack.push_back(start);
+
+        while stack.len() > 0 {
+            let node = stack.pop_back().unwrap();
+            if node == target {
+                return true;
+            }
+            if visited.contains(&node) {
+                continue;
+            }
+            visited.push_back(node);
+
+            let neighbors: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::GoalPrereqs(node))
+                .unwrap_or(Vec::new(env));
+
+            for n in neighbors.iter() {
+                if !visited.contains(&n) {
+                    stack.push_back(n);
+                }
+            }
+        }
+
+        false
     }
 }
 

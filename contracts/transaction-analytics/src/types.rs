@@ -10,6 +10,7 @@ pub struct FeeRecipientShare {
 }
 
 pub const MAX_BATCH_SIZE: u32 = 100;
+pub const MAX_PAGE_SIZE: u32 = 100;
 
 #[derive(Clone, Debug)]
 #[contracttype]
@@ -136,6 +137,17 @@ pub struct BatchStatusUpdateResult {
     pub successful: u32,
     pub failed: u32,
     pub results: Vec<StatusUpdateResult>,
+}
+
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct PaginatedBatchMetrics {
+    pub metrics: Vec<BatchMetrics>,
+    pub total_count: u32,
+    pub page_number: u32,
+    pub page_size: u32,
+    pub has_next: bool,
+    pub has_previous: bool,
 }
 
 #[derive(Clone)]

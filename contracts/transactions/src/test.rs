@@ -4,7 +4,7 @@ use crate::{
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address, Env, String, Symbol, Vec,
+    Address, Env, Map, String, Symbol, Vec,
 };
 
 #[test]
@@ -52,7 +52,15 @@ fn test_create_transaction() {
     let is_public = false;
 
     let tx_id = client.create_transaction(
-        &from, &to, &amount, &note, &memo, &tags, &tx_type, &is_public,
+        &from,
+        &to,
+        &amount,
+        &note,
+        &memo,
+        &tags,
+        &tx_type,
+        &is_public,
+        &Map::new(&env),
     );
 
     let transaction = client.get_transaction(&tx_id).unwrap();
@@ -105,6 +113,7 @@ fn test_create_transaction_invalid_amount_zero() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
 }
 
@@ -136,6 +145,7 @@ fn test_create_transaction_invalid_amount_negative() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
 }
 
@@ -167,6 +177,7 @@ fn test_update_transaction_note() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
 
     let transaction = client.get_transaction(&tx_id).unwrap();
@@ -199,7 +210,15 @@ fn test_update_transaction_amount() {
     let is_public = false;
 
     let tx_id = client.create_transaction(
-        &from, &to, &amount, &note, &memo, &tags, &tx_type, &is_public,
+        &from,
+        &to,
+        &amount,
+        &note,
+        &memo,
+        &tags,
+        &tx_type,
+        &is_public,
+        &Map::new(&env),
     );
 
     let success = client.update_transaction_amount(&tx_id, &from, &updated_amount);
@@ -254,7 +273,15 @@ fn test_get_transaction_timestamp() {
     let is_public = false;
 
     let tx_id = client.create_transaction(
-        &from, &to, &amount, &note, &memo, &tags, &tx_type, &is_public,
+        &from,
+        &to,
+        &amount,
+        &note,
+        &memo,
+        &tags,
+        &tx_type,
+        &is_public,
+        &Map::new(&env),
     );
 
     let timestamp = client.get_transaction_timestamp(&tx_id);
@@ -292,6 +319,7 @@ fn test_get_user_transactions() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
     client.create_transaction(
         &user1,
@@ -302,6 +330,7 @@ fn test_get_user_transactions() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
     client.create_transaction(
         &user2,
@@ -312,6 +341,7 @@ fn test_get_user_transactions() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
 
     let user1_txs = client.get_user_transactions(&user1);
@@ -350,6 +380,7 @@ fn test_clear_user_transactions() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
     let tx2_id = client.create_transaction(
         &user,
@@ -360,6 +391,7 @@ fn test_clear_user_transactions() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
 
     let user_txs = client.get_user_transactions(&user);
@@ -402,6 +434,7 @@ fn test_transaction_counter_increments() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
     let tx2_id = client.create_transaction(
         &from,
@@ -412,6 +445,7 @@ fn test_transaction_counter_increments() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
     let tx3_id = client.create_transaction(
         &from,
@@ -422,6 +456,7 @@ fn test_transaction_counter_increments() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
 
     assert_ne!(tx1_id, tx2_id);
@@ -452,7 +487,15 @@ fn test_transaction_exists() {
     let is_public = false;
 
     let tx_id = client.create_transaction(
-        &from, &to, &amount, &note, &memo, &tags, &tx_type, &is_public,
+        &from,
+        &to,
+        &amount,
+        &note,
+        &memo,
+        &tags,
+        &tx_type,
+        &is_public,
+        &Map::new(&env),
     );
 
     assert!(client.transaction_exists(&tx_id));
@@ -488,6 +531,7 @@ fn test_create_transaction_stores_creation_timestamp() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
 
     let tx = client.get_transaction(&tx_id).unwrap();
@@ -517,7 +561,15 @@ fn test_get_transaction_memo() {
     let is_public = false;
 
     let tx_id = client.create_transaction(
-        &from, &to, &amount, &note, &memo, &tags, &tx_type, &is_public,
+        &from,
+        &to,
+        &amount,
+        &note,
+        &memo,
+        &tags,
+        &tx_type,
+        &is_public,
+        &Map::new(&env),
     );
 
     // Test get_transaction_memo function
@@ -560,7 +612,15 @@ fn test_delete_transaction_admin_can_remove_record() {
     let is_public = false;
 
     let tx_id = client.create_transaction(
-        &from, &to, &amount, &note, &memo, &tags, &tx_type, &is_public,
+        &from,
+        &to,
+        &amount,
+        &note,
+        &memo,
+        &tags,
+        &tx_type,
+        &is_public,
+        &Map::new(&env),
     );
     assert!(client.transaction_exists(&tx_id));
 
@@ -591,7 +651,15 @@ fn test_delete_transaction_rejects_non_admin() {
     let is_public = false;
 
     let tx_id = client.create_transaction(
-        &from, &to, &amount, &note, &memo, &tags, &tx_type, &is_public,
+        &from,
+        &to,
+        &amount,
+        &note,
+        &memo,
+        &tags,
+        &tx_type,
+        &is_public,
+        &Map::new(&env),
     );
 
     let caller = Address::generate(&env);
@@ -625,6 +693,7 @@ fn test_get_all_transactions() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
     let tx2_id = client.create_transaction(
         &user2,
@@ -635,6 +704,7 @@ fn test_get_all_transactions() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
     let tx3_id = client.create_transaction(
         &user1,
@@ -645,6 +715,7 @@ fn test_get_all_transactions() {
         &tags,
         &tx_type,
         &is_public,
+        &Map::new(&env),
     );
 
     let all_txs = client.get_all_transactions();
@@ -723,6 +794,7 @@ fn test_get_transactions_paginated_offset_and_limit() {
             &tags,
             &tx_type,
             &is_public,
+            &Map::new(&env),
         );
     }
 
@@ -906,4 +978,133 @@ fn test_get_total_expense() {
 
     // Only expense amounts should be summed
     assert_eq!(client.get_total_expense(), 80);
+}
+
+#[test]
+fn test_create_transaction_with_metadata() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TransactionsContract, ());
+    let client = TransactionsContractClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+    let tags = Vec::new(&env);
+    let tx_type = Symbol::new(&env, "transfer");
+
+    let mut metadata = Map::new(&env);
+    metadata.set(
+        Symbol::new(&env, "category"),
+        String::from_str(&env, "food"),
+    );
+    metadata.set(Symbol::new(&env, "ref"), String::from_str(&env, "INV-001"));
+
+    let tx_id = client.create_transaction(
+        &from,
+        &to,
+        &500,
+        &String::from_str(&env, "note"),
+        &String::from_str(&env, "memo"),
+        &tags,
+        &tx_type,
+        &false,
+        &metadata,
+    );
+
+    let tx = client.get_transaction(&tx_id).unwrap();
+    assert_eq!(
+        tx.metadata.get(Symbol::new(&env, "category")),
+        Some(String::from_str(&env, "food"))
+    );
+    assert_eq!(
+        tx.metadata.get(Symbol::new(&env, "ref")),
+        Some(String::from_str(&env, "INV-001"))
+    );
+}
+
+#[test]
+fn test_set_and_get_metadata() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TransactionsContract, ());
+    let client = TransactionsContractClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+    let tags = Vec::new(&env);
+    let tx_type = Symbol::new(&env, "transfer");
+
+    let tx_id = client.create_transaction(
+        &from,
+        &to,
+        &100,
+        &String::from_str(&env, "note"),
+        &String::from_str(&env, "memo"),
+        &tags,
+        &tx_type,
+        &false,
+        &Map::new(&env),
+    );
+
+    let mut metadata = Map::new(&env);
+    metadata.set(
+        Symbol::new(&env, "source"),
+        String::from_str(&env, "mobile"),
+    );
+
+    let success = client.set_metadata(&tx_id, &from, &metadata);
+    assert!(success);
+
+    let retrieved = client.get_metadata(&tx_id).unwrap();
+    assert_eq!(
+        retrieved.get(Symbol::new(&env, "source")),
+        Some(String::from_str(&env, "mobile"))
+    );
+}
+
+#[test]
+fn test_set_metadata_non_owner_fails() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TransactionsContract, ());
+    let client = TransactionsContractClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+    let tags = Vec::new(&env);
+    let tx_type = Symbol::new(&env, "transfer");
+
+    let tx_id = client.create_transaction(
+        &from,
+        &to,
+        &100,
+        &String::from_str(&env, "note"),
+        &String::from_str(&env, "memo"),
+        &tags,
+        &tx_type,
+        &false,
+        &Map::new(&env),
+    );
+
+    let stranger = Address::generate(&env);
+    let mut metadata = Map::new(&env);
+    metadata.set(Symbol::new(&env, "key"), String::from_str(&env, "val"));
+
+    let success = client.set_metadata(&tx_id, &stranger, &metadata);
+    assert!(!success);
+}
+
+#[test]
+fn test_get_metadata_nonexistent_returns_none() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TransactionsContract, ());
+    let client = TransactionsContractClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    let fake_id = Symbol::new(&env, "ghost");
+    assert!(client.get_metadata(&fake_id).is_none());
 }

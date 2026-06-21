@@ -56,6 +56,18 @@ Initialize the contract with an admin address. Can only be called once.
 pub fn grant_role(env: Env, caller: Address, user: Address, role: Role)
 ```
 
+```rust
+pub fn get_user_roles(env: Env, user: Address) -> Map<Role, bool>
+```
+
+Get all roles assigned to a user. Returns an empty `Map` for users with no assigned roles.
+
+```rust
+pub fn has_any_role(env: Env, user: Address) -> bool
+```
+
+Returns `true` when the user has at least one assigned role, otherwise `false`.
+
 Grant a role to a user. Only callable by admin.
 
 ```rust

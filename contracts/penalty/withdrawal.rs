@@ -1,6 +1,9 @@
-use soroban_sdk::{Env, Address};
+use soroban_sdk::Env;
+
+use soroban_sdk::Address;
 
 use crate::penalty::config::{get_penalty_percent, get_treasury};
+use crate::treasury::TreasuryContractClient;
 
 pub fn apply_penalty_withdrawal(
     env: &Env,
@@ -21,4 +24,8 @@ pub fn apply_penalty_withdrawal(
 
     // send penalty to treasury
     token.transfer(contract, &treasury, &penalty);
+
+    // record penalty in treasury accounting
+    let client = TreasuryContractClient::new(env, &treasury);
+    client.credit_penalty(&penalty);
 }

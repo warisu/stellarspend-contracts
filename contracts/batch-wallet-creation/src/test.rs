@@ -2,13 +2,16 @@
 
 #![cfg(test)]
 
+extern crate std;
+
 use crate::{
     BatchCreateResult, BatchRecoveryResult, BatchWalletContract, BatchWalletContractClient,
     WalletCreateRequest, WalletCreateResult, WalletRecoveryRequest, WalletRecoveryResult,
 };
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Events as _, Ledger},
-    Address, Env, Vec,
+    Address, Env, Symbol, TryFromVal, Vec,
 };
 
 /// Creates a test environment with the contract deployed and initialized.
@@ -170,6 +173,20 @@ fn test_batch_create_wallets_partial_failures() {
     assert_eq!(wallet3.id, 3); // IDs continue from previous batch
 }
 
+fn event_has_topics(
+    env: &Env,
+    event: &(Address, Vec<soroban_sdk::Val>, soroban_sdk::Val),
+    topic0: Symbol,
+    topic1: Symbol,
+) -> bool {
+    if event.1.len() < 2 {
+        return false;
+    }
+    let event_topic0 = Symbol::try_from_val(env, &event.1.get(0).unwrap());
+    let event_topic1 = Symbol::try_from_val(env, &event.1.get(1).unwrap());
+    matches!((event_topic0, event_topic1), (Ok(t0), Ok(t1)) if t0 == topic0 && t1 == topic1)
+}
+
 #[test]
 fn test_batch_create_wallets_events_emitted() {
     let (env, admin, client) = setup_test_env();
@@ -184,8 +201,99 @@ fn test_batch_create_wallets_events_emitted() {
     client.batch_create_wallets(&admin, &requests);
 
     let events = env.events().all();
-    // Should have: batch_started, wallet_created (2), batch_completed
     assert!(events.len() >= 4);
+    let wallet_created_events = events
+        .iter()
+        .filter(|event| {
+            event_has_topics(
+                &env,
+                event,
+                symbol_short!("wallet"),
+                symbol_short!("created"),
+            )
+        })
+        .count();
+    assert_eq!(wallet_created_events, 2);
+}
+
+#[test]
+fn test_batch_create_wallets_event_payload_contains_wallet_details() {
+    let (env, admin, client) = setup_test_env();
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 4242;
+    });
+
+    let owner = Address::generate(&env);
+    let mut requests: Vec<WalletCreateRequest> = Vec::new(&env);
+    requests.push_back(create_wallet_request(&env, owner.clone()));
+
+    client.batch_create_wallets(&admin, &requests);
+
+    let events = env.events().all();
+    let created_event = events
+        .iter()
+        .find(|event| {
+            event_has_topics(
+                &env,
+                event,
+                symbol_short!("wallet"),
+                symbol_short!("created"),
+            )
+        })
+        .expect("wallet created event should be emitted");
+
+    let payload: crate::WalletCreatedEvent =
+        TryFromVal::try_from_val(&env, &created_event.2).unwrap();
+
+    assert_eq!(payload.owner, owner);
+    assert_eq!(payload.wallet_id, 1);
+    assert_eq!(payload.created_at, 4242);
+}
+
+#[test]
+fn test_failed_wallet_creation_does_not_emit_success_event() {
+    let (env, admin, client) = setup_test_env();
+
+    let owner1 = Address::generate(&env);
+    let owner2 = Address::generate(&env);
+
+    let mut requests1: Vec<WalletCreateRequest> = Vec::new(&env);
+    requests1.push_back(create_wallet_request(&env, owner1.clone()));
+    client.batch_create_wallets(&admin, &requests1);
+
+    let mut requests2: Vec<WalletCreateRequest> = Vec::new(&env);
+    requests2.push_back(create_wallet_request(&env, owner1.clone())); // duplicate -> failure
+    requests2.push_back(create_wallet_request(&env, owner2.clone())); // success
+
+    client.batch_create_wallets(&admin, &requests2);
+
+    let events = env.events().all();
+    let created_events = events
+        .iter()
+        .filter(|event| {
+            event_has_topics(
+                &env,
+                event,
+                symbol_short!("wallet"),
+                symbol_short!("created"),
+            )
+        })
+        .count();
+    let failure_events = events
+        .iter()
+        .filter(|event| {
+            event_has_topics(
+                &env,
+                event,
+                symbol_short!("wallet"),
+                symbol_short!("failure"),
+            )
+        })
+        .count();
+
+    assert_eq!(created_events, 1); // only the successful wallet in the second batch emits a created event
+    assert_eq!(failure_events, 1); // duplicate wallet must not emit a success event
 }
 
 #[test]
@@ -576,10 +684,12 @@ fn test_batch_create_wallets_duplicate_event_emitted() {
     for (_, topics, _) in events.iter() {
         let topic_vec = topics.clone();
         if topic_vec.len() >= 2 {
-            let topic1: soroban_sdk::Symbol =
-                topic_vec.get(0).unwrap().into_val(&env).try_into().ok();
-            let topic2: soroban_sdk::Symbol =
-                topic_vec.get(1).unwrap().into_val(&env).try_into().ok();
+            let topic1: Option<Symbol> = topic_vec
+                .get(0)
+                .and_then(|val| Symbol::try_from_val(&env, &val).ok());
+            let topic2: Option<Symbol> = topic_vec
+                .get(1)
+                .and_then(|val| Symbol::try_from_val(&env, &val).ok());
             if topic1 == Some(soroban_sdk::Symbol::new(&env, "wallet"))
                 && topic2 == Some(soroban_sdk::Symbol::new(&env, "duplicate"))
             {

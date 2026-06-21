@@ -224,6 +224,39 @@ fn test_has_any_role() {
 }
 
 #[test]
+fn test_get_user_roles_returns_empty_for_user_with_no_roles() {
+    let (env, contract_id, admin) = create_contract();
+    let client = AccessControlContractClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let roles = client.get_user_roles(&user);
+
+    assert_eq!(roles.get(Role::Admin), None);
+    assert_eq!(roles.get(Role::User), None);
+    assert_eq!(roles.get(Role::Operator), None);
+    assert_eq!(roles.get(Role::Auditor), None);
+    assert!(!client.has_any_role(&user));
+}
+
+#[test]
+fn test_has_any_role_returns_true_for_assigned_roles() {
+    let (env, contract_id, admin) = create_contract();
+    let client = AccessControlContractClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.grant_role(&admin, &user, &Role::Auditor);
+
+    assert!(client.has_any_role(&user));
+    assert_eq!(client.get_user_roles(&user).get(Role::Auditor), Some(true));
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_non_admin_cannot_grant_role() {
     let (env, contract_id, _) = create_contract();

@@ -29,11 +29,16 @@ members = [
     "contracts/batch-token-mint",
     "contracts/asset_control",
     "contracts/access-control",
+    "contracts/budget",
     "contracts/category-analytics",
     "contracts/spending-categories",
     "contracts/users",
     "contracts/transactions",
     "contracts/transaction-validation",
+    "contracts/merchant-tagging",
+    "contracts/currency-conversion",
+    "contracts/benchmarks",
+    "contracts/zk-verifier",
 ]
 
 [package]
@@ -57,6 +62,14 @@ path = "tests/memo_tests.rs"
 [[test]]
 name = "governance_test"
 path = "contracts/tests/governance_test.rs"
+
+[[test]]
+name = "rate_limit_tests"
+path = "tests/rate_limit_tests.rs"
+
+[[test]]
+name = "concurrent_spending_tests"
+path = "contracts/tests/concurrent_spending_tests.rs"
 
 [workspace.package]
 version = "0.1.0"

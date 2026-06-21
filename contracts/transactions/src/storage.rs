@@ -1,5 +1,5 @@
 use crate::TransactionError;
-use soroban_sdk::{contracttype, panic_with_error, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contracttype, panic_with_error, Address, Env, Map, String, Symbol, Vec};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
@@ -28,6 +28,7 @@ pub struct Transaction {
     pub status: TransactionStatus,
     pub tx_type: Symbol,
     pub is_public: bool,
+    pub metadata: Map<Symbol, String>,
 }
 
 #[derive(Clone)]
@@ -56,6 +57,7 @@ pub fn create_transaction(
     tags: Vec<String>,
     tx_type: Symbol,
     is_public: bool,
+    metadata: Map<Symbol, String>,
 ) -> Transaction {
     let tx_id = crate::utils::generate_transaction_id(env);
 
@@ -81,6 +83,7 @@ pub fn create_transaction(
         status: TransactionStatus::Completed,
         tx_type,
         is_public,
+        metadata,
     };
 
     // Store the transaction
@@ -253,7 +256,7 @@ pub fn clear_user_transactions(env: &Env, user: Address) -> bool {
         .unwrap_or_else(|| Vec::new(env));
 
     // Get current all transactions
-    let mut all_txs: Vec<Symbol> = env
+    let all_txs: Vec<Symbol> = env
         .storage()
         .persistent()
         .get(&DataKey::AllTransactions)
@@ -383,6 +386,39 @@ pub fn delete_transaction(env: &Env, id: Symbol) -> bool {
 /// Get transaction memo
 pub fn get_transaction_memo(env: &Env, id: Symbol) -> Option<String> {
     get_transaction(env, id).map(|tx| tx.memo)
+}
+
+/// Set metadata key-value pairs for a transaction (only owner can update).
+pub fn set_transaction_metadata(
+    env: &Env,
+    id: Symbol,
+    caller: Address,
+    metadata: Map<Symbol, String>,
+) -> bool {
+    let mut transaction: Transaction = match env
+        .storage()
+        .persistent()
+        .get(&DataKey::Transaction(id.clone()))
+    {
+        Some(tx) => tx,
+        None => return false,
+    };
+
+    if transaction.from != caller {
+        return false;
+    }
+
+    transaction.metadata = metadata;
+    env.storage()
+        .persistent()
+        .set(&DataKey::Transaction(id), &transaction);
+
+    true
+}
+
+/// Get metadata key-value pairs for a transaction.
+pub fn get_transaction_metadata(env: &Env, id: Symbol) -> Option<Map<Symbol, String>> {
+    get_transaction(env, id).map(|tx| tx.metadata)
 }
 
 /// Get all transactions in the contract

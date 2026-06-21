@@ -21,20 +21,21 @@
 
 #![no_std]
 
+mod cross_contract;
 mod types;
 mod validation;
 
-use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, Symbol, Vec};
 
 pub use crate::types::{
-    BatchLimitMetrics, BatchLimitResult, DataKey, ErrorCode, LimitEvents, LimitUpdateResult,
-    LimitsConfig, SpendingLimit, SpendingLimitRequest, MAX_BATCH_SIZE,
+    BatchLimitMetrics, BatchLimitResult, DataKey, ErrorCode, EscalationConfig, ExceptionRule,
+    LimitEvents, LimitStrategy, LimitUpdateResult, LimitsConfig, SpendingLimit,
+    SpendingLimitRequest, MAX_BATCH_SIZE,
 };
 use crate::validation::validate_limit_request;
 
 // Add cross-contract imports for whitelist functionality
 use crate::cross_contract::DataKey as CrossContractDataKey;
-use soroban_sdk::{Bytes, Symbol};
 
 /// Error codes for the spending limits contract.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -52,10 +53,14 @@ pub enum SpendingLimitError {
     BatchTooLarge = 5,
     /// Daily limit exceeded
     DailyLimitExceeded = 6,
+    /// Hourly limit exceeded
+    HourlyLimitExceeded = 7,
     /// Monthly limit exceeded
-    MonthlyLimitExceeded = 7,
+    MonthlyLimitExceeded = 8,
     /// Invalid spend amount
-    InvalidAmount = 8,
+    InvalidAmount = 9,
+    /// Category is not in the approved list
+    CategoryNotApproved = 10,
 }
 
 impl From<SpendingLimitError> for soroban_sdk::Error {
@@ -165,11 +170,14 @@ impl SpendingLimitsContract {
                     let limit = SpendingLimit {
                         user: request.user.clone(),
                         monthly_limit: request.monthly_limit,
+                        daily_limit: request.daily_limit,
+                        hourly_limit: request.hourly_limit,
                         reset_window_seconds: request.reset_window_seconds,
                         current_spending: 0, // Reset spending when updating limit
                         category: request.category.clone(),
                         updated_at: current_ledger,
                         is_active: true,
+                        strategy: request.strategy.clone(),
                     };
 
                     // Accumulate metrics
@@ -298,9 +306,7 @@ impl SpendingLimitsContract {
 
     /// Returns the current escalation configuration.
     pub fn get_escalation_config(env: Env) -> Option<EscalationConfig> {
-        env.storage()
-            .instance()
-            .get(&DataKey::EscalationConfig)
+        env.storage().instance().get(&DataKey::EscalationConfig)
     }
 
     /// Admin approves a large spend that was escalated.
@@ -321,7 +327,10 @@ impl SpendingLimitsContract {
             None => panic_with_error!(&env, SpendingLimitError::InvalidAmount),
         };
 
-        limit.current_spending = limit.current_spending.checked_add(amount).unwrap_or(i128::MAX);
+        limit.current_spending = limit
+            .current_spending
+            .checked_add(amount)
+            .unwrap_or(i128::MAX);
         limit.updated_at = env.ledger().timestamp();
 
         env.storage()
@@ -344,15 +353,24 @@ impl SpendingLimitsContract {
     ///
     /// If no limit is configured for the user or the limit is inactive, the spend is
     /// allowed and no state is updated.
-    pub fn enforce_spending_limit(env: Env, user: Address, amount: i128) {
+    pub fn enforce_spending_limit(env: Env, user: Address, amount: i128, category: Option<Symbol>) {
         // Validate amount
         if amount <= 0 {
             panic_with_error!(&env, SpendingLimitError::InvalidAmount);
         }
 
+        // If a category is supplied and the user has an active exception for it,
+        // bypass all limit checks and emit a bypass event.
+        if let Some(ref cat) = category {
+            if Self::is_exempt_internal(&env, &user, cat) {
+                LimitEvents::exception_bypassed(&env, &user, amount, cat);
+                return;
+            }
+        }
+
         // Check if destination is whitelisted (spending whitelist)
         // This prevents unauthorized destinations from receiving funds
-        if !Self::is_destination_whitelisted(env, user.clone()) {
+        if !Self::is_destination_whitelisted_internal(&env, &user) {
             panic_with_error!(&env, SpendingLimitError::Unauthorized);
         }
 
@@ -372,16 +390,20 @@ impl SpendingLimitsContract {
 
         let now = env.ledger().timestamp();
 
-        // Derive simple logical window/month identifiers from timestamp.
+        // Derive logical window/month identifiers from timestamp.
+        const SECONDS_PER_HOUR: u64 = 3600;
         const SECONDS_PER_DAY: u64 = 86_400;
         const SECONDS_PER_MONTH: u64 = SECONDS_PER_DAY * 30;
 
-        // Reset windows are configurable and must be validated at limit setup.
-        let window_seconds = limit.reset_window_seconds;
-        let window_id = if now == 0 {
+        let hourly_window_id = if now == 0 {
             0
         } else {
-            (now - 1) / window_seconds
+            (now - 1) / SECONDS_PER_HOUR
+        };
+        let daily_window_id = if now == 0 {
+            0
+        } else {
+            (now - 1) / SECONDS_PER_DAY
         };
         let month_id = if now == 0 {
             0
@@ -389,47 +411,49 @@ impl SpendingLimitsContract {
             (now - 1) / SECONDS_PER_MONTH
         };
 
-        // Load current window and monthly totals.
-        let window_key = DataKey::WindowSpending(user.clone(), window_id);
+        // Load current window totals.
+        let hourly_key = DataKey::HourlySpending(user.clone(), hourly_window_id);
+        let daily_key = DataKey::DailySpending(user.clone(), daily_window_id);
         let monthly_key = DataKey::MonthlySpending(user.clone(), month_id);
 
-        let current_window: i128 = env.storage().persistent().get(&window_key).unwrap_or(0);
+        let current_hourly: i128 = env.storage().persistent().get(&hourly_key).unwrap_or(0);
+        let current_daily: i128 = env.storage().persistent().get(&daily_key).unwrap_or(0);
         let current_monthly: i128 = env.storage().persistent().get(&monthly_key).unwrap_or(0);
 
-        let new_window = current_window
+        let new_hourly = current_hourly
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, SpendingLimitError::InvalidBatch));
+        let new_daily = current_daily
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, SpendingLimitError::InvalidBatch));
         let new_monthly = current_monthly
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, SpendingLimitError::InvalidBatch));
 
-        // Derive a limit for the configured reset window from the monthly limit.
-        let window_limit = if limit.monthly_limit <= 0 {
-            0
-        } else {
-            let base = limit.monthly_limit * window_seconds as i128 / SECONDS_PER_MONTH as i128;
-            if base == 0 {
-                1
-            } else {
-                base
-            }
-        };
-
-        let mut window_ok = true;
+        let mut hourly_ok = true;
+        let mut daily_ok = true;
         let mut monthly_ok = true;
 
-        if new_window > window_limit {
-            window_ok = false;
+        if new_hourly > limit.hourly_limit {
+            hourly_ok = false;
+        }
+        if new_daily > limit.daily_limit {
+            daily_ok = false;
         }
         if new_monthly > limit.monthly_limit {
             monthly_ok = false;
         }
 
-        if !window_ok || !monthly_ok {
-            let remaining_window = if current_window >= window_limit {
+        if !hourly_ok || !daily_ok || !monthly_ok {
+            let remaining_hourly = if current_hourly >= limit.hourly_limit {
                 0
             } else {
-                window_limit - current_window
+                limit.hourly_limit - current_hourly
+            };
+            let remaining_daily = if current_daily >= limit.daily_limit {
+                0
+            } else {
+                limit.daily_limit - current_daily
             };
             let remaining_monthly = if current_monthly >= limit.monthly_limit {
                 0
@@ -437,17 +461,49 @@ impl SpendingLimitsContract {
                 limit.monthly_limit - current_monthly
             };
 
-            LimitEvents::limit_exceeded(&env, &user, amount, remaining_window, remaining_monthly);
+            LimitEvents::limit_exceeded(
+                &env,
+                &user,
+                amount,
+                remaining_hourly,
+                remaining_daily,
+                remaining_monthly,
+            );
 
-            if !window_ok {
+            if !hourly_ok {
+                panic_with_error!(&env, SpendingLimitError::HourlyLimitExceeded);
+            } else if !daily_ok {
                 panic_with_error!(&env, SpendingLimitError::DailyLimitExceeded);
             } else {
                 panic_with_error!(&env, SpendingLimitError::MonthlyLimitExceeded);
             }
         }
 
+        // If adaptive strategy is enabled and user is nearing their limit (>= 90%)
+        // automatically increase the limit by 10% for future transactions.
+        if limit.strategy == crate::types::LimitStrategy::Adaptive
+            && new_monthly >= (limit.monthly_limit * 9 / 10)
+        {
+            let old_limit = limit.monthly_limit;
+            let increment = limit.monthly_limit / 10;
+            let proposed_limit = old_limit
+                .checked_add(increment)
+                .unwrap_or(crate::types::MAX_SPENDING_LIMIT);
+
+            limit.monthly_limit = if proposed_limit > crate::types::MAX_SPENDING_LIMIT {
+                crate::types::MAX_SPENDING_LIMIT
+            } else {
+                proposed_limit
+            };
+
+            if limit.monthly_limit != old_limit {
+                LimitEvents::limit_adjusted(&env, &user, old_limit, limit.monthly_limit);
+            }
+        }
+
         // Persist updated totals.
-        env.storage().persistent().set(&window_key, &new_window);
+        env.storage().persistent().set(&hourly_key, &new_hourly);
+        env.storage().persistent().set(&daily_key, &new_daily);
         env.storage().persistent().set(&monthly_key, &new_monthly);
 
         // Keep the embedded "current_spending" and "updated_at" in sync with the
@@ -579,6 +635,138 @@ impl SpendingLimitsContract {
             .unwrap_or(0)
     }
 
+    /// Adds a category to the admin-approved exception allow-list.
+    ///
+    /// Only categories in this list can be used in exception rules. Admin only.
+    pub fn add_approved_category(env: Env, caller: Address, category: Symbol) {
+        caller.require_auth();
+        Self::require_admin(&env, &caller);
+
+        let mut categories: Vec<Symbol> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ApprovedCategories)
+            .unwrap_or(Vec::new(&env));
+
+        if !categories.contains(&category) {
+            categories.push_back(category.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::ApprovedCategories, &categories);
+            LimitEvents::approved_category_added(&env, &category);
+        }
+    }
+
+    /// Removes a category from the admin-approved exception allow-list. Admin only.
+    pub fn remove_approved_category(env: Env, caller: Address, category: Symbol) {
+        caller.require_auth();
+        Self::require_admin(&env, &caller);
+
+        let categories: Vec<Symbol> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ApprovedCategories)
+            .unwrap_or(Vec::new(&env));
+
+        let mut new_categories: Vec<Symbol> = Vec::new(&env);
+        let mut found = false;
+        for cat in categories.iter() {
+            if cat == category {
+                found = true;
+            } else {
+                new_categories.push_back(cat);
+            }
+        }
+
+        if found {
+            env.storage()
+                .instance()
+                .set(&DataKey::ApprovedCategories, &new_categories);
+            LimitEvents::approved_category_removed(&env, &category);
+        }
+    }
+
+    /// Returns all admin-approved exception categories.
+    pub fn get_approved_categories(env: Env) -> Vec<Symbol> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ApprovedCategories)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Grants a spending limit exception to a user for a specific approved category.
+    ///
+    /// When `enforce_spending_limit` is called with this category for this user,
+    /// the normal daily/monthly checks are skipped. Admin only.
+    ///
+    /// # Errors
+    /// * `CategoryNotApproved` - if the category is not in the approved list
+    pub fn add_exception(env: Env, caller: Address, user: Address, category: Symbol) {
+        caller.require_auth();
+        Self::require_admin(&env, &caller);
+
+        // Verify the category is approved before granting exception
+        let categories: Vec<Symbol> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ApprovedCategories)
+            .unwrap_or(Vec::new(&env));
+
+        if !categories.contains(&category) {
+            panic_with_error!(&env, SpendingLimitError::CategoryNotApproved);
+        }
+
+        let rule = ExceptionRule {
+            user: user.clone(),
+            category: category.clone(),
+            created_at: env.ledger().sequence() as u64,
+            is_active: true,
+        };
+
+        env.storage().persistent().set(
+            &DataKey::ExceptionRule(user.clone(), category.clone()),
+            &rule,
+        );
+
+        LimitEvents::exception_added(&env, &user, &category);
+    }
+
+    /// Removes an active spending limit exception for a user+category pair. Admin only.
+    pub fn remove_exception(env: Env, caller: Address, user: Address, category: Symbol) {
+        caller.require_auth();
+        Self::require_admin(&env, &caller);
+
+        let key = DataKey::ExceptionRule(user.clone(), category.clone());
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+            LimitEvents::exception_removed(&env, &user, &category);
+        }
+    }
+
+    /// Returns the exception rule for a user+category pair, if one exists.
+    pub fn get_exception(env: Env, user: Address, category: Symbol) -> Option<ExceptionRule> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ExceptionRule(user, category))
+    }
+
+    /// Returns `true` if the user has an active exception for the given category.
+    pub fn is_exempt(env: Env, user: Address, category: Symbol) -> bool {
+        Self::is_exempt_internal(&env, &user, &category)
+    }
+
+    /// Internal helper: checks exemption without consuming Env.
+    fn is_exempt_internal(env: &Env, user: &Address, category: &Symbol) -> bool {
+        match env
+            .storage()
+            .persistent()
+            .get::<DataKey, ExceptionRule>(&DataKey::ExceptionRule(user.clone(), category.clone()))
+        {
+            Some(rule) => rule.is_active,
+            None => false,
+        }
+    }
+
     // Internal helper to verify admin
     fn require_admin(env: &Env, caller: &Address) {
         let config: LimitsConfig = env
@@ -592,14 +780,44 @@ impl SpendingLimitsContract {
         }
     }
 
-    /// Checks if a destination address is whitelisted for receiving funds.
-    /// Uses the cross-contract whitelist functionality to determine authorization.
-    fn is_destination_whitelisted(env: &Env, destination: &Address) -> bool {
+    /// Internal helper for destination whitelist checks without consuming Env.
+    fn is_destination_whitelisted_internal(env: &Env, destination: &Address) -> bool {
         // Use the same whitelist storage pattern as cross-contract module
         // Check if destination is in whitelist
         env.storage()
             .persistent()
             .has(&CrossContractDataKey::Whitelist(destination.clone()))
+    }
+
+    pub fn override_spending_limit(
+        env: Env,
+        admin: Address,
+        user: Address,
+        new_monthly_limit: i128,
+    ) {
+        admin.require_auth();
+
+        Self::require_admin(&env, &admin);
+
+        if new_monthly_limit <= 0 {
+            panic_with_error!(&env, SpendingLimitError::InvalidAmount);
+        }
+
+        let mut limit: SpendingLimit = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SpendingLimit(user.clone()))
+            .expect("Spending limit not found");
+
+        let old_limit = limit.monthly_limit;
+
+        limit.monthly_limit = new_monthly_limit;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SpendingLimit(user.clone()), &limit);
+
+        LimitEvents::spending_limit_overridden(&env, &admin, &user, old_limit, new_monthly_limit);
     }
 }
 

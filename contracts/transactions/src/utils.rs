@@ -1,3 +1,4 @@
+use soroban_sdk::string::ToString;
 use soroban_sdk::{Env, String, Symbol};
 
 /// Generate a unique transaction ID
@@ -19,5 +20,5 @@ pub fn generate_transaction_id(env: &Env) -> Symbol {
         .persistent()
         .set(&crate::storage::DataKey::TransactionCounter, &counter);
 
-    Symbol::new(env, &id_str)
+    Symbol::new(env, id_str.as_str())
 }

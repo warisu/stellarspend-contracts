@@ -18,12 +18,23 @@ fn test_clean_description_passes() {
     let from = Address::generate(&env);
     let to = Address::generate(&env);
     let amount = 100;
-    
+
     // Clean description remains unchanged and execution passes
     let clean_desc = String::from_str(&env, "Payment for dinner.");
-    
-    // Result should be Ok(())
-    client.execute_transfer(&from, &to, &amount, &clean_desc);
+
+    // Result should be Ok with a reference ID
+    let result = client.execute_transfer(&from, &to, &amount, &clean_desc);
+    assert!(result.is_ok());
+
+    // Verify reference ID format
+    let ref_id = result.unwrap();
+    assert!(ref_id.len() > 0);
+    // Reference IDs should start with "TXN-"
+    let ref_id_str = std::string::String::from_utf8(
+        ref_id.as_ref().iter().map(|b| *b as u8).collect::<Vec<_>>(),
+    )
+    .unwrap_or_default();
+    assert!(ref_id_str.starts_with("TXN-"));
 }
 
 #[test]
@@ -33,10 +44,10 @@ fn test_invalid_characters_rejected() {
     let from = Address::generate(&env);
     let to = Address::generate(&env);
     let amount = 100;
-    
+
     // Description containing invalid characters (e.g., emojis or unsupported symbols)
     let invalid_desc = String::from_str(&env, "Payment 🎉");
-    
+
     // This should panic with the SharedError::InvalidInput error code (3)
     client.execute_transfer(&from, &to, &amount, &invalid_desc);
 }
@@ -48,7 +59,7 @@ fn test_html_tags_rejected() {
     let from = Address::generate(&env);
     let to = Address::generate(&env);
     let amount = 100;
-    
+
     let html_desc = String::from_str(&env, "<script>alert('xss')</script>");
     client.execute_transfer(&from, &to, &amount, &html_desc);
 }
@@ -59,9 +70,32 @@ fn test_empty_description_passes() {
     let from = Address::generate(&env);
     let to = Address::generate(&env);
     let amount = 100;
-    
+
     let empty_desc = String::from_str(&env, "");
-    
-    // Empty strings shouldn't fail
-    client.execute_transfer(&from, &to, &amount, &empty_desc);
+
+    // Empty strings shouldn't fail and should return a reference ID
+    let result = client.execute_transfer(&from, &to, &amount, &empty_desc);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_transfer_generates_unique_reference_ids() {
+    let (env, client) = setup_test();
+    let from = Address::generate(&env);
+    let to1 = Address::generate(&env);
+    let to2 = Address::generate(&env);
+    let amount = 100;
+
+    let desc = String::from_str(&env, "Payment");
+
+    // Execute two transfers from the same sender
+    let ref_id_1 = client
+        .execute_transfer(&from, &to1, &amount, &desc)
+        .unwrap();
+    let ref_id_2 = client
+        .execute_transfer(&from, &to2, &amount, &desc)
+        .unwrap();
+
+    // Reference IDs should be different for different transactions
+    assert_ne!(ref_id_1, ref_id_2);
 }

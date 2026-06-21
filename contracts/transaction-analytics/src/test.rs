@@ -5,7 +5,7 @@
 use crate::{
     BundleResult, BundledTransaction, RefundRequest, RefundStatus, Transaction,
     TransactionAnalyticsContract, TransactionAnalyticsContractClient, TransactionStatus,
-    TransactionStatusUpdate, ValidationResult,
+    TransactionStatusUpdate, ValidationResult, MAX_PAGE_SIZE,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events},
@@ -258,6 +258,85 @@ fn test_get_batch_metrics_after_processing() {
 
     assert_eq!(stored_metrics.tx_count, processed_metrics.tx_count);
     assert_eq!(stored_metrics.total_volume, processed_metrics.total_volume);
+}
+
+#[test]
+fn test_get_batch_metrics_paginated_returns_correct_page() {
+    let (env, admin, client) = setup_test_env();
+
+    for tx_id in 1..=5 {
+        let mut transactions: Vec<Transaction> = Vec::new(&env);
+        transactions.push_back(create_transaction(
+            &env,
+            tx_id,
+            tx_id as i128 * 100,
+            "transfer",
+        ));
+        client.process_batch(&admin, &transactions, &None);
+    }
+
+    let page0 = client.get_batch_metrics_paginated(&0, &2);
+    assert_eq!(page0.total_count, 5);
+    assert_eq!(page0.page_number, 0);
+    assert_eq!(page0.page_size, 2);
+    assert_eq!(page0.metrics.len(), 2);
+    assert_eq!(page0.metrics.get(0).unwrap().total_volume, 100);
+    assert_eq!(page0.metrics.get(1).unwrap().total_volume, 200);
+    assert!(page0.has_next);
+    assert!(!page0.has_previous);
+
+    let page2 = client.get_batch_metrics_paginated(&2, &2);
+    assert_eq!(page2.total_count, 5);
+    assert_eq!(page2.page_number, 2);
+    assert_eq!(page2.metrics.len(), 1);
+    assert_eq!(page2.metrics.get(0).unwrap().total_volume, 500);
+    assert!(!page2.has_next);
+    assert!(page2.has_previous);
+}
+
+#[test]
+fn test_get_batch_metrics_paginated_empty_page_returns_empty_array() {
+    let (env, admin, client) = setup_test_env();
+
+    for tx_id in 1..=2 {
+        let mut transactions: Vec<Transaction> = Vec::new(&env);
+        transactions.push_back(create_transaction(
+            &env,
+            tx_id,
+            tx_id as i128 * 100,
+            "transfer",
+        ));
+        client.process_batch(&admin, &transactions, &None);
+    }
+
+    let page = client.get_batch_metrics_paginated(&1, &2);
+    assert_eq!(page.total_count, 2);
+    assert_eq!(page.metrics.len(), 0);
+    assert!(!page.has_next);
+    assert!(page.has_previous);
+}
+
+#[test]
+fn test_get_batch_metrics_paginated_page_size_capped_at_maximum() {
+    let (env, admin, client) = setup_test_env();
+
+    for tx_id in 1..=3 {
+        let mut transactions: Vec<Transaction> = Vec::new(&env);
+        transactions.push_back(create_transaction(
+            &env,
+            tx_id,
+            tx_id as i128 * 100,
+            "transfer",
+        ));
+        client.process_batch(&admin, &transactions, &None);
+    }
+
+    let page = client.get_batch_metrics_paginated(&0, &200);
+    assert_eq!(page.total_count, 3);
+    assert_eq!(page.page_size, MAX_PAGE_SIZE);
+    assert_eq!(page.metrics.len(), 3);
+    assert!(!page.has_next);
+    assert!(!page.has_previous);
 }
 
 #[test]

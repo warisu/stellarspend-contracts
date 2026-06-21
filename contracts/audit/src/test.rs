@@ -65,6 +65,55 @@ fn test_initialize_contract() {
     );
 }
 
+// src/contract.rs
+
+use soroban_sdk::{contract, contractimpl, Address, Env};
+use crate::admin::{get_admin, is_initialized, require_admin, set_admin};
+use crate::types::Error;
+
+#[contract]
+pub struct AdminContract;
+
+#[contractimpl]
+impl AdminContract {
+    /// Set the admin address. May only be called once.
+    ///
+    /// Subsequent calls panic with `Error::AlreadyInitialized` so the admin
+    /// cannot be silently overwritten by a replay or a misconfigured deploy
+    /// script.
+    ///
+    /// No authentication is required for the first call — the deployer is
+    /// trusted to supply the correct address at deploy time. After this point
+    /// every privileged action requires the admin to sign.
+    pub fn initialize(env: Env, admin: Address) {
+        if is_initialized(&env) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+        set_admin(&env, &admin);
+    }
+
+    /// Transfer admin rights to a new address.
+    ///
+    /// Requires the current admin's signature. The new admin does not need
+    /// to sign here — they accept implicitly. If you need explicit acceptance
+    /// (two-step transfer), store a `PendingAdmin` key and add a `accept_admin`
+    /// entry point.
+    pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) {
+        require_admin(&env, &current_admin);
+        set_admin(&env, &new_admin);
+    }
+
+    /// Return the stored admin address. No authentication required.
+    pub fn get_admin(env: Env) -> Address {
+        get_admin(&env)
+    }
+
+    /// Return whether the contract has been initialized.
+    pub fn is_initialized(env: Env) -> bool {
+        is_initialized(&env)
+    }
+}
+
 #[test]
 #[should_panic(expected = "contract already initialized")]
 fn test_cannot_initialize_twice() {
@@ -660,4 +709,97 @@ fn test_audit_log_integrity_batch_consistency() {
     assert!(client.verify_audit_immutability(&1, &actor1, &operation));
     assert!(client.verify_audit_immutability(&2, &actor2, &operation));
     assert!(client.verify_audit_immutability(&3, &actor1, &operation));
+}
+
+#[test]
+fn test_get_logs_by_user_empty() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let unknown = Address::generate(&env);
+    let logs = client.get_logs_by_user(&unknown);
+    assert_eq!(logs.len(), 0);
+}
+
+#[test]
+fn test_get_logs_by_user_returns_only_own_logs() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let actor_a = Address::generate(&env);
+    let actor_b = Address::generate(&env);
+    let op = Symbol::new(&env, "transfer");
+    let status = Symbol::new(&env, "success");
+
+    client.log_audit(&actor_a, &op, &status, None);
+    client.log_audit(&actor_b, &op, &status, None);
+    client.log_audit(&actor_a, &op, &status, None);
+
+    let logs_a = client.get_logs_by_user(&actor_a);
+    let logs_b = client.get_logs_by_user(&actor_b);
+
+    assert_eq!(logs_a.len(), 2);
+    assert_eq!(logs_b.len(), 1);
+
+    // All returned logs must belong to actor_a
+    for log in logs_a.iter() {
+        assert_eq!(log.actor, actor_a);
+    }
+}
+
+#[test]
+fn test_get_logs_by_range_empty_result() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    // Log at timestamp 1_700_000_000; query a range entirely in the future
+    let actor = Address::generate(&env);
+    client.log_audit(&actor, &Symbol::new(&env, "op"), &Symbol::new(&env, "ok"), None);
+
+    let logs = client.get_logs_by_range(&1_800_000_000, &1_900_000_000);
+    assert_eq!(logs.len(), 0);
+}
+
+#[test]
+fn test_get_logs_by_range_inclusive_bounds() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    let actor = Address::generate(&env);
+    let op = Symbol::new(&env, "op");
+    let status = Symbol::new(&env, "ok");
+
+    // All three logs share timestamp 1_700_000_000 (set in setup_env)
+    client.log_audit(&actor, &op, &status, None);
+    client.log_audit(&actor, &op, &status, None);
+    client.log_audit(&actor, &op, &status, None);
+
+    // Exact match on both bounds
+    let logs = client.get_logs_by_range(&1_700_000_000, &1_700_000_000);
+    assert_eq!(logs.len(), 3);
+}
+
+#[test]
+fn test_get_logs_by_range_no_logs() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    // No logs written at all
+    let logs = client.get_logs_by_range(&0, &9_999_999_999);
+    assert_eq!(logs.len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "start timestamp cannot be greater than end timestamp")]
+fn test_get_logs_by_range_invalid_bounds() {
+    let env = setup_env();
+    let (client, admin) = deploy_contract(&env);
+    client.initialize(&admin, &1000_u32);
+
+    client.get_logs_by_range(&1_700_000_001, &1_700_000_000);
 }
