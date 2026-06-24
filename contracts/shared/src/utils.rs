@@ -1,3 +1,5 @@
+use alloc::format;
+use alloc::string::ToString;
 use soroban_sdk::{Env, String, Symbol};
 
 /// Shared validation errors for simple reusable helpers.
