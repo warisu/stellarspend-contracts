@@ -249,7 +249,8 @@ Look for issues tagged `good first issue` on the Issues page.
 2. Create a branch: `git checkout -b feature/your-feature`
 3. Make your changes and add tests
 4. Run `cargo test --workspace`
-5. Open a Pull Request with a clear description
+5. Run `cargo audit` locally to check for dependency vulnerabilities (CI blocks merge on failure)
+6. Open a Pull Request with a clear description
 
 ### What We Need Help With
 

@@ -45,3 +45,12 @@ jobs:
 
       - name: Build WASM release
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Generate Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Run cargo audit (dependency vulnerability scan)
+        run: cargo audit
