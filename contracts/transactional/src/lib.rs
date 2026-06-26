@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Env, Symbol, Error};
+use soroban_sdk::{contract, contractimpl, contracttype, Env, Error, Symbol};
 
 #[derive(Clone)]
 #[contracttype]
@@ -49,11 +49,7 @@ impl TransactionContract {
         env.storage().instance().set(&key, &tx);
 
         // get counter
-        let mut counter: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Counter)
-            .unwrap_or(0);
+        let mut counter: u32 = env.storage().instance().get(&DataKey::Counter).unwrap_or(0);
 
         counter += 1;
 
@@ -64,9 +60,7 @@ impl TransactionContract {
 
         // set first transaction if this is first insert
         if counter == 1 {
-            env.storage()
-                .instance()
-                .set(&DataKey::FirstTx, &tx.id);
+            env.storage().instance().set(&DataKey::FirstTx, &tx.id);
         }
 
         // update counter
@@ -77,10 +71,7 @@ impl TransactionContract {
 
     /// 🟢 Fetch earliest transaction (FIRST ENTRY)
     pub fn get_earliest_transaction(env: Env) -> Option<Transaction> {
-        let first_id: Option<Symbol> = env
-            .storage()
-            .instance()
-            .get(&DataKey::FirstTx);
+        let first_id: Option<Symbol> = env.storage().instance().get(&DataKey::FirstTx);
 
         match first_id {
             Some(id) => {
@@ -93,11 +84,7 @@ impl TransactionContract {
 
     /// Calculate the average amount across stored transactions.
     pub fn get_average_transaction_amount(env: Env) -> i128 {
-        let counter: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Counter)
-            .unwrap_or(0);
+        let counter: u32 = env.storage().instance().get(&DataKey::Counter).unwrap_or(0);
 
         if counter == 0 {
             return 0;

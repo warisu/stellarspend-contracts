@@ -174,3 +174,110 @@ impl ComplianceContract {
         flagged.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Address,
+        Env,
+        String,
+        U256,
+    };
+
+    #[test]
+    fn transaction_above_limit_is_flagged() {
+        let env = Env::default();
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        env.mock_all_auths();
+
+        initialize_compliance(&env, admin.clone());
+
+        set_limit(
+            &env,
+            admin,
+            String::from_str(&env, "max_transfer_amount"),
+            1000,
+        );
+
+        let tx_id = U256::from_u32(&env, 1);
+
+        let flagged =
+            check_and_flag_transaction(&env, tx_id.clone(), user, 2000);
+
+        assert!(flagged);
+        assert!(is_transaction_flagged(&env, tx_id));
+    }
+
+    #[test]
+    fn transaction_below_limit_is_not_flagged() {
+        let env = Env::default();
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        env.mock_all_auths();
+
+        initialize_compliance(&env, admin.clone());
+
+        set_limit(
+            &env,
+            admin,
+            String::from_str(&env, "max_transfer_amount"),
+            1000,
+        );
+
+        let tx_id = U256::from_u32(&env, 2);
+
+        let flagged =
+            check_and_flag_transaction(&env, tx_id.clone(), user, 500);
+
+        assert!(!flagged);
+        assert!(!is_transaction_flagged(&env, tx_id));
+    }
+
+    #[test]
+    fn flagged_transaction_count_is_updated() {
+        let env = Env::default();
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        env.mock_all_auths();
+
+        initialize_compliance(&env, admin.clone());
+
+        set_limit(
+            &env,
+            admin,
+            String::from_str(&env, "max_transfer_amount"),
+            1000,
+        );
+
+        check_and_flag_transaction(
+            &env,
+            U256::from_u32(&env, 1),
+            user.clone(),
+            2000,
+        );
+
+        check_and_flag_transaction(
+            &env,
+            U256::from_u32(&env, 2),
+            user,
+            3000,
+        );
+
+        let flagged: Vec<U256> = env
+            .storage()
+            .instance()
+            .get(&ComplianceDataKey::FlaggedTransactions)
+            .unwrap();
+
+        assert_eq!(flagged.len(), 2);
+    }
+}
